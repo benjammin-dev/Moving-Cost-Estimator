@@ -26,6 +26,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-django_react}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-django_react}
       POSTGRES_HOST: db
+      FMCSA_WEBKEY: ${FMCSA_WEBKEY:-}
       POSTGRES_PORT: 5432
     depends_on:
       db:

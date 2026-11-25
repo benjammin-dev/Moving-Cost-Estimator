@@ -51,6 +51,10 @@ REST_FRAMEWORK = {
 # use a shared cache (e.g. Redis) to make it exact across gunicorn workers.
 QUOTE_PREVIEW_RATE = os.environ.get('DJANGO_QUOTE_PREVIEW_RATE', '120/minute')
 
+# Key for FMCSA's QCMobile API, used by `manage.py import_fmcsa_movers`.
+# Get one at https://mobile.fmcsa.dot.gov/QCDevsite/ and put it in backend/.env.
+FMCSA_WEBKEY = os.environ.get('FMCSA_WEBKEY', '')
+
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
