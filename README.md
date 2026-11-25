@@ -161,21 +161,20 @@ Before deploying anywhere public, edit `.env` to set a real `DJANGO_SECRET_KEY` 
 
 ### Importing movers from FMCSA
 
-`import_fmcsa_movers` builds mover profiles from FMCSA's free public data. It reads the [Company Census File](https://catalog.data.gov/dataset/company-census-file) for active carriers in a state that list household goods as cargo, then confirms each one through the [QCMobile API](https://mobile.fmcsa.dot.gov/QCDevsite/docs/qcApi). A carrier is imported only if it's allowed to operate, isn't out of service, and hauls household goods. New profiles start **unclaimed** and **unverified**, and can't be booked until a UTC permit number is verified.
+`import_fmcsa_movers` builds mover profiles from FMCSA's free public [Carrier – All With History](https://catalog.data.gov/dataset/carrier-all-with-history) data. No API key is needed. It imports carriers based in the state that have household goods authority, and only motor carriers (MC numbers) with **active** common or contract authority count. Freight forwarders are skipped, and a carrier listed under several dockets becomes one profile. New profiles start **unclaimed** and **unverified**, and can't be booked until a UTC permit number is verified.
 
-1. Get a free QCMobile key at https://mobile.fmcsa.dot.gov/QCDevsite/ and add it to `backend/.env`:
-   ```
-   FMCSA_WEBKEY=your-key
-   ```
-2. Run the import from `backend/`:
-   ```bash
-   python manage.py import_fmcsa_movers --dry-run --limit 20   # try it; saves nothing
-   python manage.py import_fmcsa_movers                         # full run (Washington, ~15 min)
-   ```
+Run it from `backend/`:
 
-Options: `--state XX` (default `WA`), `--census-file PATH` (read a downloaded census CSV instead of querying the DOT portal), `--limit N`, `--sleep SECONDS` (pause between carriers, default `0.25`), `--dry-run`, and `-v 2` to log every carrier.
+```bash
+python manage.py import_fmcsa_movers --dry-run   # see what would change; saves nothing
+python manage.py import_fmcsa_movers             # import (Washington by default)
+```
 
-It's safe to re-run. Existing profiles are updated, never duplicated. Claimed profiles keep the mover's own details, and only their federal status is refreshed. Carriers that stop qualifying are set to inactive rather than deleted, and failed lookups are left unchanged and can be retried by running it again.
+Options: `--state XX` (default `WA`), `--file PATH` (read a CSV export of the dataset instead of downloading it), `--limit N`, `--dry-run`, and `-v 2` to log every carrier.
+
+It's safe to re-run. Existing profiles are updated, never duplicated, and claimed profiles keep the mover's own details. If a carrier's authority lapses or it disappears from the data, an unclaimed profile is set to inactive (never deleted), and a claimed one is reported for review. A carrier whose MC number is already on another profile is skipped and reported.
+
+The dataset was last refreshed in May 2026 and FMCSA no longer updates it, so treat it as a snapshot. It only includes carriers with federal operating authority, so local-only movers need to list themselves.
 
 ---
 
@@ -242,10 +241,10 @@ backend/
     test_pricing.py     # pricing engine unit tests
   movers/
     models.py           # Mover profiles (unclaimed / unverified / verified / inactive)
-    fmcsa.py            # Company Census File and QCMobile API clients
+    fmcsa.py            # reads and combines FMCSA authority records
     importer.py         # import rules
     management/commands/import_fmcsa_movers.py
-    tests/              # tests and sample QCMobile responses (fixtures/)
+    tests/
   backend/settings.py   # environment-driven settings
 frontend/
   src/

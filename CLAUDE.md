@@ -5,7 +5,7 @@ Moving Cost Estimator: a Django REST + React app that prices local moves by the 
 ## Layout
 
 - `backend/`: Django + DRF + Simple JWT. Two apps, `api/` (estimates) and `movers/` (mover profiles).
-  - `movers/`: the `Mover` model and `manage.py import_fmcsa_movers`, which imports household goods carriers from FMCSA's Company Census File (`fmcsa.py`) after confirming them through QCMobile. The import rules are in `importer.py`. The QCMobile response parsers in `fmcsa.py` are marked as placeholders until they're checked against a real response. Tests use the saved responses in `movers/tests/fixtures/` and never call FMCSA.
+  - `movers/`: the `Mover` model and `manage.py import_fmcsa_movers`, which imports household goods movers from FMCSA's public "Carrier – All With History" dataset (`6eyk-hxee`, no API key). `fmcsa.py` downloads and combines the records, and `importer.py` has the import rules. The dataset is a May 2026 snapshot that FMCSA no longer updates. Tests use sample records and never call FMCSA.
   - `api/pricing.py`: the pricing engine and the `PRICING` config dict.
   - `api/models.py`: `Estimator` (an estimate), `CompletedMove`, `Note`.
   - `api/views.py`: `price_move()` is the single place views call the engine. Estimates are always priced server-side.
