@@ -12,13 +12,12 @@ import csv
 import json
 import re
 import time
-import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
+from .http import FetchError, fetch
+
 AUTHORITY_API_URL = "https://data.transportation.gov/resource/6eyk-hxee.json"
-USER_AGENT = "moving-cost-estimator-mover-import"
 
 # Columns the importer uses; selecting only these keeps the download small.
 AUTHORITY_FIELDS = [
@@ -27,42 +26,17 @@ AUTHORITY_FIELDS = [
     "common_stat", "contract_stat", "hhg_chk",
 ]
 
-RETRY_STATUSES = {429, 500, 502, 503, 504}
+# Same class as http.FetchError; the FMCSA name is kept for readability.
+FMCSAError = FetchError
 
 
-class FMCSAError(Exception):
-    """A request for FMCSA data failed."""
-
-
-def get_json(url, params=None, *, retries=3, backoff=1.0, timeout=60,
-             opener=urllib.request.urlopen, sleep=time.sleep):
-    """GET a JSON URL and return the parsed body. Retries rate-limit and
-    server errors with a growing wait between attempts."""
-    full_url = f"{url}?{urllib.parse.urlencode(params)}" if params else url
-    request = urllib.request.Request(full_url, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
-    for attempt in range(retries + 1):
-        try:
-            with opener(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as err:
-            if err.code not in RETRY_STATUSES or attempt == retries:
-                raise FMCSAError(f"HTTP {err.code}") from None
-            sleep(_retry_after(err) or backoff * 2 ** attempt)
-        except (urllib.error.URLError, TimeoutError) as err:
-            if attempt == retries:
-                reason = getattr(err, "reason", err)
-                kind = type(reason).__name__ if isinstance(reason, BaseException) else "network error"
-                raise FMCSAError(f"connection failed ({kind})") from None
-            sleep(backoff * 2 ** attempt)
-        except ValueError:
-            raise FMCSAError("response was not valid JSON") from None
-
-
-def _retry_after(err):
+def get_json(url, params=None, *, opener=urllib.request.urlopen, sleep=time.sleep, **kwargs):
+    """GET a JSON URL and return the parsed body (retries as in http.fetch)."""
+    body = fetch(url, params, accept="application/json", opener=opener, sleep=sleep, **kwargs)
     try:
-        return max(0.0, float(err.headers.get("Retry-After")))
-    except (TypeError, ValueError, AttributeError):
-        return None
+        return json.loads(body.decode("utf-8"))
+    except ValueError:
+        raise FMCSAError("response was not valid JSON") from None
 
 
 # ---------------------------------------------------------------------------
