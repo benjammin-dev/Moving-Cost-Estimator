@@ -57,3 +57,29 @@ class Mover(models.Model):
     def is_bookable(self):
         """Customers can only book a verified mover with a UTC permit number."""
         return self.status == self.Status.VERIFIED and bool(self.utc_permit_number)
+
+
+class ImportRun(models.Model):
+    """One run of the FMCSA import, from the command line or the Movers page,
+    so the app can show what happened last."""
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    state = models.CharField(max_length=2)
+    source = models.CharField(max_length=255, help_text="FMCSA download, or the CSV file read")
+    dry_run = models.BooleanField(default=False)
+    # Empty when run from the command line.
+    triggered_by = models.ForeignKey(
+        "auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="mover_imports"
+    )
+    succeeded = models.BooleanField(default=False)
+    error = models.TextField(blank=True)
+    stats = models.JSONField(default=dict, blank=True)
+    # Messages worth reviewing (conflicts, deactivations), capped.
+    messages = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ["-started_at", "-id"]
+
+    def __str__(self):
+        kind = "Dry run" if self.dry_run else "Import"
+        return f"{kind} {self.state} at {self.started_at:%Y-%m-%d %H:%M}"

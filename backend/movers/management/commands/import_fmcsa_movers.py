@@ -2,8 +2,8 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
-from movers.fmcsa import FMCSAError, check_state, iter_authority_api, iter_authority_file
-from movers.importer import import_movers
+from movers.fmcsa import FMCSAError, check_state
+from movers.services import run_import
 
 
 class Command(BaseCommand):
@@ -38,14 +38,12 @@ class Command(BaseCommand):
             if not Path(path).is_file():
                 raise CommandError(f"File not found: {path}")
             self.stdout.write(f"Reading household goods carriers in {state} from {path}...")
-            rows = iter_authority_file(path)
         else:
             self.stdout.write(f"Downloading household goods carriers in {state} from FMCSA...")
-            rows = iter_authority_api(state)
 
         try:
-            stats = import_movers(
-                rows, state=state, dry_run=options["dry_run"], limit=options["limit"],
+            _, stats = run_import(
+                state=state, dry_run=options["dry_run"], limit=options["limit"], file_path=path,
                 log=self.stderr.write, debug=debug,
             )
         except FMCSAError as err:

@@ -13,13 +13,13 @@ from movers.fmcsa import FMCSAError
 from movers.models import Mover
 from movers.tests.test_fmcsa import record
 
-COMMAND = "movers.management.commands.import_fmcsa_movers"
+DOWNLOAD = "movers.services.iter_authority_api"
 
 
 class ImportCommandTests(TestCase):
     def call(self, *args, rows=()):
         out, err = StringIO(), StringIO()
-        with patch(f"{COMMAND}.iter_authority_api", return_value=iter(rows)) as download:
+        with patch(DOWNLOAD, return_value=iter(rows)) as download:
             call_command("import_fmcsa_movers", *args, stdout=out, stderr=err)
         self.download = download
         return out.getvalue(), err.getvalue()
@@ -51,7 +51,7 @@ class ImportCommandTests(TestCase):
             raise FMCSAError("FMCSA download failed: HTTP 503")
             yield  # pragma: no cover
 
-        with patch(f"{COMMAND}.iter_authority_api", side_effect=failing):
+        with patch(DOWNLOAD, side_effect=failing):
             with self.assertRaisesMessage(CommandError, "FMCSA download failed: HTTP 503"):
                 call_command("import_fmcsa_movers", stdout=StringIO(), stderr=StringIO())
 
@@ -61,7 +61,7 @@ class ImportCommandTests(TestCase):
                     "MC000007,00000007,FILE MOVER,WA,Y,A,N\n"
                     "MC000008,00000008,OREGON MOVER,OR,Y,A,N\n")
         self.addCleanup(Path(f.name).unlink)
-        with patch(f"{COMMAND}.iter_authority_api") as download:
+        with patch(DOWNLOAD) as download:
             call_command("import_fmcsa_movers", "--file", f.name, stdout=StringIO(), stderr=StringIO())
         download.assert_not_called()
         self.assertEqual(list(Mover.objects.values_list("usdot_number", flat=True)), [7])
