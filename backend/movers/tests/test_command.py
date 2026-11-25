@@ -1,5 +1,5 @@
-"""Tests for `manage.py import_fmcsa_movers`. The census download and the
-QCMobile client are replaced with fakes, so nothing touches the network."""
+"""Tests for `manage.py import_fmcsa_movers`. The download is replaced with
+sample records, so nothing touches the network."""
 
 from io import StringIO
 from pathlib import Path
@@ -7,92 +7,70 @@ from tempfile import NamedTemporaryFile
 from unittest.mock import patch
 
 from django.core.management import CommandError, call_command
-from django.test import TestCase, override_settings
+from django.test import TestCase
 
-from movers.fmcsa import CarrierCheck, FMCSAError
+from movers.fmcsa import FMCSAError
 from movers.models import Mover
+from movers.tests.test_fmcsa import record
 
-KEY = "test-webkey-not-real-456"
 COMMAND = "movers.management.commands.import_fmcsa_movers"
-QUALIFIES = CarrierCheck(found=True, allowed_to_operate=True, out_of_service=False, household_goods=True)
 
 
-def census_row(dot):
-    return {"dot_number": str(dot), "legal_name": f"CARRIER {dot}", "phy_state": "WA",
-            "crgo_household": "X", "status_code": "A"}
-
-
-class FakeClient:
-    def __init__(self, webkey, failures=()):
-        self.webkey = webkey
-        self.failures = failures
-
-    def check(self, dot):
-        if dot in self.failures:
-            raise FMCSAError(f"QCMobile carrier lookup failed: HTTP 500 for {self.webkey}")
-        return QUALIFIES
-
-
-@override_settings(FMCSA_WEBKEY=KEY)
 class ImportCommandTests(TestCase):
-    def call(self, *args, rows=(), failures=()):
+    def call(self, *args, rows=()):
         out, err = StringIO(), StringIO()
-        with patch(f"{COMMAND}.iter_census_api", return_value=iter(rows)) as census, \
-                patch(f"{COMMAND}.QCMobileClient", side_effect=lambda key: FakeClient(key, failures)):
-            call_command("import_fmcsa_movers", "--sleep", "0", *args, stdout=out, stderr=err)
-        self.census = census
+        with patch(f"{COMMAND}.iter_authority_api", return_value=iter(rows)) as download:
+            call_command("import_fmcsa_movers", *args, stdout=out, stderr=err)
+        self.download = download
         return out.getvalue(), err.getvalue()
 
-    def test_imports_and_prints_a_summary(self):
-        out, _ = self.call(rows=[census_row(1), census_row(2)])
-        self.census.assert_called_once_with("WA")
-        self.assertEqual(Mover.objects.count(), 2)
-        self.assertIn("Checked 2 carriers: 2 confirmed (2 new, 0 updated), 0 rejected, 0 set inactive, 0 errors.", out)
+    def test_imports_without_any_api_key_and_prints_a_summary(self):
+        out, _ = self.call(rows=[
+            record(dot="00000001", docket="MC000001"),
+            record(dot="00000002", docket="MC000002", common="I"),
+            record(dot="00000003", docket="FF000003"),
+        ])
+        self.download.assert_called_once_with("WA")
+        self.assertEqual(list(Mover.objects.values_list("usdot_number", flat=True)), [1])
+        self.assertIn("3 records, 2 motor carriers: 1 new, 0 updated, 1 skipped (no active authority), "
+                      "0 set inactive, 0 MC conflicts. 1 freight forwarders skipped.", out)
 
     def test_dry_run_saves_nothing(self):
-        out, _ = self.call("--dry-run", rows=[census_row(1)])
+        out, _ = self.call("--dry-run", rows=[record()])
         self.assertFalse(Mover.objects.exists())
         self.assertIn("Dry run, nothing saved.", out)
 
-    def test_errors_are_reported_without_the_key(self):
-        out, err = self.call(rows=[census_row(1), census_row(2)], failures={2})
-        self.assertEqual(Mover.objects.count(), 1)
-        self.assertIn("USDOT 2", err)
-        self.assertIn("1 errors", out)
-        self.assertIn("Re-run to retry them", out)
-        self.assertNotIn(KEY, out + err)
+    def test_conflicts_are_reported(self):
+        Mover.objects.create(name="Existing", usdot_number=999, mc_number="12345")
+        out, err = self.call(rows=[record()])
+        self.assertIn("MC 12345 is already on USDOT 999", err)
+        self.assertIn("1 carriers were skipped", out)
 
-    def test_census_download_failure_is_a_clear_error(self):
+    def test_download_failure_is_a_clear_error(self):
         def failing(state):
-            raise FMCSAError("Census download failed: HTTP 503")
+            raise FMCSAError("FMCSA download failed: HTTP 503")
             yield  # pragma: no cover
 
-        with patch(f"{COMMAND}.iter_census_api", side_effect=failing), \
-                patch(f"{COMMAND}.QCMobileClient", side_effect=lambda key: FakeClient(key)):
-            with self.assertRaisesMessage(CommandError, "Census download failed: HTTP 503"):
-                call_command("import_fmcsa_movers", "--sleep", "0", stdout=StringIO(), stderr=StringIO())
+        with patch(f"{COMMAND}.iter_authority_api", side_effect=failing):
+            with self.assertRaisesMessage(CommandError, "FMCSA download failed: HTTP 503"):
+                call_command("import_fmcsa_movers", stdout=StringIO(), stderr=StringIO())
 
-    def test_reads_a_downloaded_census_file(self):
+    def test_reads_a_csv_export(self):
         with NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
-            f.write("DOT_NUMBER,LEGAL_NAME,PHY_STATE,CRGO_HOUSEHOLD,STATUS_CODE\n7,FILE MOVER,WA,X,A\n8,OREGON,OR,X,A\n")
+            f.write("DOCKET_NUMBER,DOT_NUMBER,LEGAL_NAME,BUS_STATE_CODE,HHG_CHK,COMMON_STAT,CONTRACT_STAT\n"
+                    "MC000007,00000007,FILE MOVER,WA,Y,A,N\n"
+                    "MC000008,00000008,OREGON MOVER,OR,Y,A,N\n")
         self.addCleanup(Path(f.name).unlink)
-        with patch(f"{COMMAND}.iter_census_api") as census, \
-                patch(f"{COMMAND}.QCMobileClient", side_effect=lambda key: FakeClient(key)):
-            call_command("import_fmcsa_movers", "--sleep", "0", "--census-file", f.name, stdout=StringIO(), stderr=StringIO())
-        census.assert_not_called()
+        with patch(f"{COMMAND}.iter_authority_api") as download:
+            call_command("import_fmcsa_movers", "--file", f.name, stdout=StringIO(), stderr=StringIO())
+        download.assert_not_called()
         self.assertEqual(list(Mover.objects.values_list("usdot_number", flat=True)), [7])
 
     def test_rejects_bad_options(self):
         for args, message in [
-            (["--census-file", "/no/such/file.csv"], "Census file not found"),
+            (["--file", "/no/such/file.csv"], "File not found"),
             (["--state", "Washington"], "two-letter state code"),
             (["--limit", "0"], "--limit must be at least 1"),
-            (["--sleep", "-1"], "--sleep can't be negative"),
         ]:
             with self.subTest(args=args), self.assertRaisesMessage(CommandError, message):
                 call_command("import_fmcsa_movers", *args, stdout=StringIO(), stderr=StringIO())
-
-    @override_settings(FMCSA_WEBKEY="")
-    def test_missing_key_is_a_clear_error(self):
-        with self.assertRaisesMessage(CommandError, "FMCSA_WEBKEY is not set"):
-            call_command("import_fmcsa_movers", stdout=StringIO(), stderr=StringIO())

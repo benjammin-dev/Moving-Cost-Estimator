@@ -10,7 +10,7 @@ class Mover(models.Model):
     class Status(models.TextChoices):
         UNVERIFIED = "unverified", "Unverified"
         VERIFIED = "verified", "Verified"
-        # No longer qualifies (e.g. FMCSA says it isn't allowed to operate).
+        # No longer qualifies (e.g. its federal authority went inactive).
         # Kept rather than deleted, since it may have been claimed.
         INACTIVE = "inactive", "Inactive"
 
@@ -36,13 +36,14 @@ class Mover(models.Model):
     google_place_id = models.CharField(max_length=255, null=True, blank=True, unique=True)
 
     # Federal (FMCSA) data, refreshed by every import, claimed or not.
-    fmcsa_allowed_to_operate = models.BooleanField(null=True, blank=True)
-    fmcsa_out_of_service = models.BooleanField(null=True, blank=True)
-    hhg_confirmed_at = models.DateTimeField(
-        "household goods confirmed at", null=True, blank=True,
-        help_text="Last time QCMobile confirmed this carrier hauls household goods",
+    fmcsa_authority_active = models.BooleanField(
+        "FMCSA authority active", null=True, blank=True,
+        help_text="Active common or contract household goods authority in FMCSA's data",
     )
-    last_seen_in_census = models.DateTimeField(null=True, blank=True)
+    fmcsa_synced_at = models.DateTimeField(
+        "FMCSA synced at", null=True, blank=True,
+        help_text="Last time the FMCSA import found this carrier",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

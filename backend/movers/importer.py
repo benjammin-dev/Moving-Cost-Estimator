@@ -1,132 +1,115 @@
-"""Turns FMCSA census rows into Mover profiles, confirming each carrier
-through QCMobile first. Used by `manage.py import_fmcsa_movers`.
+"""Turns FMCSA household goods authority records into Mover profiles. Used
+by `manage.py import_fmcsa_movers`.
 
 Rules:
-- A carrier is imported only if QCMobile finds it, it's allowed to operate,
-  it isn't out of service, and its cargo includes household goods.
-- New profiles start unclaimed and unverified.
-- Claimed profiles belong to the mover: only the federal (FMCSA) fields are
-  refreshed, never the name, contact details, UTC permit or claim.
-- A carrier that stops qualifying is set to inactive, not deleted:
-    * not allowed to operate / out of service: always (claimed or not)
-    * no household goods, not found, or gone from the census: only while
-      unclaimed. A claimed profile is left for a person to review.
-- A carrier whose lookup errors is left exactly as it was.
-- Movers that were never confirmed by an import (e.g. self-listed) are
-  never deactivated for being missing from the census.
+- Records are combined per USDOT number (see fmcsa.combine_records). Only
+  motor carriers (MC dockets) count; freight forwarders are skipped.
+- A carrier is imported only if its federal authority is active. New
+  profiles start unclaimed and unverified.
+- Re-runs update profiles, never duplicate them. Claimed profiles belong to
+  the mover: only the federal fields are refreshed, never the name, contact
+  details, UTC permit, status or claim.
+- If a carrier's authority goes inactive, or it disappears from the data on
+  a full run, an unclaimed profile is set to inactive (never deleted). A
+  claimed profile is left alone and logged for review: federal authority
+  covers interstate moves and isn't the same thing as a UTC permit.
+- A carrier whose MC number is already on another USDOT's profile is
+  skipped and logged rather than merged.
+- Movers the import never found (e.g. self-listed) are never touched.
 """
 
-import time
 from dataclasses import dataclass
 
 from django.db import transaction
 from django.utils import timezone
 
-from .fmcsa import FMCSAError, census_mc_number, is_candidate
+from .fmcsa import combine_records
 from .models import Mover
 
 
 @dataclass
 class ImportStats:
-    candidates: int = 0
-    confirmed: int = 0
+    records: int = 0
+    carriers: int = 0
     created: int = 0
     updated: int = 0
-    rejected: int = 0
+    inactive_skipped: int = 0  # no active authority and no existing profile
+    forwarders_skipped: int = 0
+    conflicts: int = 0
     deactivated: int = 0
-    errors: int = 0
 
 
 def _clean(value, max_length):
     return " ".join(str(value or "").split())[:max_length]
 
 
-def census_profile_fields(row):
-    """Identity fields for a Mover, from one census row."""
+def profile_fields(carrier):
+    """Identity fields for a Mover, from a combined carrier."""
+    row = carrier.record
     return {
-        "name": _clean(row.get("legal_name"), 200) or f"USDOT {row.get('dot_number')}",
+        "name": _clean(row.get("legal_name"), 200) or f"USDOT {carrier.dot_number}",
         "dba_name": _clean(row.get("dba_name"), 200),
-        "mc_number": _clean(census_mc_number(row), 20),
-        "street": _clean(row.get("phy_street"), 200),
-        "city": _clean(row.get("phy_city"), 100),
-        "state": _clean(row.get("phy_state"), 2).upper(),
-        "zip_code": _clean(row.get("phy_zip"), 10),
-        "phone": _clean(row.get("phone"), 20),
+        "mc_number": carrier.mc_number,
+        "street": _clean(row.get("bus_street_po"), 200),
+        "city": _clean(row.get("bus_city"), 100),
+        "state": _clean(row.get("bus_state_code"), 2).upper(),
+        "zip_code": _clean(row.get("bus_zip_code"), 10),
+        "phone": _clean(row.get("bus_telno"), 20),
     }
 
 
-def import_movers(rows, client, *, state="WA", dry_run=False, limit=None, sleep_seconds=0.25,
-                  sleep=time.sleep, now=None, log=lambda msg: None, debug=lambda msg: None):
-    """Import movers from census `rows` (any iterable of dicts). `client`
-    needs a `check(dot_number)` method returning a CarrierCheck."""
+def import_movers(rows, *, state="WA", dry_run=False, limit=None, now=None,
+                  log=lambda msg: None, debug=lambda msg: None):
+    """Import movers from FMCSA authority `rows` (any iterable of dicts)."""
     now = now or timezone.now()
-    stats = ImportStats()
-    in_census = set()
-    first = True
+    combined = combine_records(rows, state)
+    stats = ImportStats(records=combined.records, forwarders_skipped=combined.forwarders_skipped)
+    carriers = combined.carriers if limit is None else combined.carriers[:limit]
+    stats.carriers = len(carriers)
 
-    for row in rows:
-        if not is_candidate(row, state):
-            continue
-        try:
-            dot = int(str(row.get("dot_number", "")).strip())
-        except ValueError:
-            continue
-        if dot in in_census:
-            continue
-        if limit is not None and stats.candidates >= limit:
-            break
-        stats.candidates += 1
-        in_census.add(dot)
-
-        if not first and sleep_seconds:
-            sleep(sleep_seconds)
-        first = False
-
-        try:
-            check = client.check(dot)
-        except FMCSAError as err:
-            stats.errors += 1
-            log(f"USDOT {dot}: {err}. Left unchanged.")
-            continue
-
+    for carrier in carriers:
+        dot = carrier.dot_number
         existing = Mover.objects.filter(usdot_number=dot).first()
 
-        if not check.qualifies:
-            stats.rejected += 1
-            debug(f"USDOT {dot}: rejected ({check.reason}).")
+        if not carrier.authority_active:
             if existing:
-                _record_rejection(existing, check, stats, dry_run, now, log)
+                _record_inactive_authority(existing, stats, dry_run, now, log)
+            else:
+                stats.inactive_skipped += 1
+                debug(f"USDOT {dot}: no active authority, skipped.")
             continue
 
-        stats.confirmed += 1
+        clash = Mover.objects.filter(mc_number=carrier.mc_number).exclude(usdot_number=dot).first()
+        if clash:
+            stats.conflicts += 1
+            log(f"USDOT {dot}: MC {carrier.mc_number} is already on USDOT {clash.usdot_number}'s profile. Skipped for review.")
+            continue
+
         if existing:
             stats.updated += 1
-            debug(f"USDOT {dot}: confirmed, updating.")
+            debug(f"USDOT {dot}: updating.")
             if not dry_run:
-                _update_confirmed(existing, row, now)
+                _update(existing, carrier, now)
         else:
             stats.created += 1
-            debug(f"USDOT {dot}: confirmed, creating.")
+            debug(f"USDOT {dot}: creating.")
             if not dry_run:
                 Mover.objects.create(
-                    usdot_number=dot,
-                    **census_profile_fields(row),
-                    fmcsa_allowed_to_operate=True,
-                    fmcsa_out_of_service=False,
-                    hhg_confirmed_at=now,
-                    last_seen_in_census=now,
+                    usdot_number=dot, **profile_fields(carrier),
+                    fmcsa_authority_active=True, fmcsa_synced_at=now,
                 )
 
-    # Only a complete run can say a carrier has left the census.
+    # Only a complete run can say a carrier has left the data.
     if limit is None:
+        found = {c.dot_number for c in combined.carriers}
         gone = (
-            Mover.objects.filter(state=state, claimed=False, hhg_confirmed_at__isnull=False)
+            Mover.objects.filter(state=state.upper(), claimed=False, fmcsa_synced_at__isnull=False)
             .exclude(status=Mover.Status.INACTIVE)
-            .exclude(usdot_number__in=in_census)
+            .exclude(usdot_number__in=found)
         )
         for mover in gone:
             stats.deactivated += 1
-            log(f"USDOT {mover.usdot_number}: no longer in the census as an active household goods carrier. Set to inactive.")
+            log(f"USDOT {mover.usdot_number}: no longer in FMCSA's household goods data. Set to inactive.")
             if not dry_run:
                 mover.status = Mover.Status.INACTIVE
                 mover.save(update_fields=["status", "updated_at"])
@@ -135,33 +118,28 @@ def import_movers(rows, client, *, state="WA", dry_run=False, limit=None, sleep_
 
 
 @transaction.atomic
-def _update_confirmed(mover, row, now):
-    mover.fmcsa_allowed_to_operate = True
-    mover.fmcsa_out_of_service = False
-    mover.hhg_confirmed_at = now
-    mover.last_seen_in_census = now
+def _update(mover, carrier, now):
+    mover.fmcsa_authority_active = True
+    mover.fmcsa_synced_at = now
     if not mover.claimed:
-        for field, value in census_profile_fields(row).items():
+        for field, value in profile_fields(carrier).items():
             setattr(mover, field, value)
-    if mover.status == Mover.Status.INACTIVE:
-        mover.status = Mover.Status.UNVERIFIED  # qualifies again; needs re-verifying
+        if mover.status == Mover.Status.INACTIVE:
+            mover.status = Mover.Status.UNVERIFIED  # active again; needs re-verifying
     mover.save()
 
 
-def _record_rejection(mover, check, stats, dry_run, now, log):
-    federal_block = check.found and (not check.allowed_to_operate or check.out_of_service)
-    deactivate = mover.status != Mover.Status.INACTIVE and (federal_block or not mover.claimed)
+def _record_inactive_authority(mover, stats, dry_run, now, log):
+    deactivate = not mover.claimed and mover.status != Mover.Status.INACTIVE
     if deactivate:
         stats.deactivated += 1
-        log(f"USDOT {mover.usdot_number}: {check.reason}. Set to inactive.")
-    elif mover.claimed and mover.status != Mover.Status.INACTIVE:
-        log(f"USDOT {mover.usdot_number}: {check.reason}, but the profile is claimed. Left active for review.")
+        log(f"USDOT {mover.usdot_number}: federal authority is no longer active. Set to inactive.")
+    elif mover.claimed:
+        log(f"USDOT {mover.usdot_number}: federal authority is no longer active, but the profile is claimed. Left as is for review.")
     if dry_run:
         return
-    if check.found:
-        mover.fmcsa_allowed_to_operate = check.allowed_to_operate
-        mover.fmcsa_out_of_service = check.out_of_service
-    mover.last_seen_in_census = now
+    mover.fmcsa_authority_active = False
+    mover.fmcsa_synced_at = now
     if deactivate:
         mover.status = Mover.Status.INACTIVE
     mover.save()

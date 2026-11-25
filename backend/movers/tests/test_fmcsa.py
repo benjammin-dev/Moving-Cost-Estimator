@@ -1,5 +1,5 @@
-"""Tests for the FMCSA census and QCMobile clients. No real network calls:
-HTTP is faked, and QCMobile responses come from tests/fixtures/."""
+"""Tests for reading and combining FMCSA authority records. No network:
+HTTP is faked."""
 
 import json
 import tempfile
@@ -11,23 +11,27 @@ from django.test import SimpleTestCase
 
 from movers import fmcsa
 from movers.fmcsa import (
-    CarrierCheck,
     FMCSAError,
-    QCMobileClient,
-    census_mc_number,
+    combine_records,
     get_json,
-    iter_census_api,
-    iter_census_file,
-    parse_carrier,
-    parse_household_goods,
+    is_active,
+    iter_authority_api,
+    iter_authority_file,
+    mc_number,
+    parse_dot,
 )
 
-FIXTURES = Path(__file__).parent / "fixtures"
-SECRET = "test-webkey-not-real-123"
 
-
-def fixture(name):
-    return json.loads((FIXTURES / name).read_text())
+def record(dot="00012345", docket="MC012345", common="A", contract="N", **overrides):
+    """A record shaped like the real dataset (6eyk-hxee)."""
+    base = {
+        "docket_number": docket, "dot_number": dot,
+        "legal_name": "ACME MOVING & STORAGE INC", "dba_name": "ACME MOVERS",
+        "bus_street_po": "100 MAIN ST", "bus_city": "SEATTLE", "bus_state_code": "WA",
+        "bus_zip_code": "98101-1234", "bus_telno": "2065550100",
+        "common_stat": common, "contract_stat": contract, "hhg_chk": "Y",
+    }
+    return {**base, **overrides}
 
 
 def http_error(code, headers=None):
@@ -43,22 +47,18 @@ def ok_response(body):
 
 class GetJsonTests(SimpleTestCase):
     def test_returns_parsed_json(self):
-        opener = MagicMock(return_value=ok_response({"a": 1}))
-        self.assertEqual(get_json("https://x.test/a", {"q": "1"}, opener=opener), {"a": 1})
+        opener = MagicMock(return_value=ok_response([{"a": 1}]))
+        self.assertEqual(get_json("https://x.test/a", {"q": "1"}, opener=opener), [{"a": 1}])
         self.assertEqual(opener.call_args.args[0].full_url, "https://x.test/a?q=1")
 
-    def test_404_returns_none(self):
-        opener = MagicMock(side_effect=http_error(404))
-        self.assertIsNone(get_json("https://x.test", opener=opener, sleep=lambda s: None))
-
     def test_retries_rate_limits_and_server_errors(self):
-        opener = MagicMock(side_effect=[http_error(429), http_error(503), ok_response([1])])
+        opener = MagicMock(side_effect=[http_error(429), http_error(503), ok_response([])])
         waits = []
-        self.assertEqual(get_json("https://x.test", opener=opener, sleep=waits.append, backoff=1), [1])
+        self.assertEqual(get_json("https://x.test", opener=opener, sleep=waits.append, backoff=1), [])
         self.assertEqual(waits, [1, 2])
 
     def test_honours_retry_after(self):
-        opener = MagicMock(side_effect=[http_error(429, {"Retry-After": "7"}), ok_response({})])
+        opener = MagicMock(side_effect=[http_error(429, {"Retry-After": "7"}), ok_response([])])
         waits = []
         get_json("https://x.test", opener=opener, sleep=waits.append)
         self.assertEqual(waits, [7.0])
@@ -70,20 +70,15 @@ class GetJsonTests(SimpleTestCase):
         self.assertEqual(opener.call_count, 3)
 
     def test_does_not_retry_client_errors(self):
-        opener = MagicMock(side_effect=http_error(401))
+        opener = MagicMock(side_effect=http_error(400))
         with self.assertRaises(FMCSAError):
             get_json("https://x.test", opener=opener, sleep=lambda s: None)
         self.assertEqual(opener.call_count, 1)
 
-    def test_errors_never_include_the_url_or_key(self):
-        cases = [http_error(401), urllib.error.URLError("boom"), TimeoutError()]
-        for error in cases:
-            opener = MagicMock(side_effect=error)
-            with self.assertRaises(FMCSAError) as ctx:
-                get_json("https://x.test/carriers/1", {"webKey": SECRET}, opener=opener, retries=0)
-            self.assertNotIn(SECRET, str(ctx.exception))
-            self.assertNotIn("x.test", str(ctx.exception))
-            self.assertIsNone(ctx.exception.__cause__)
+    def test_connection_errors(self):
+        for error in (urllib.error.URLError("boom"), TimeoutError()):
+            with self.assertRaisesMessage(FMCSAError, "connection failed"):
+                get_json("https://x.test", opener=MagicMock(side_effect=error), retries=0)
 
     def test_invalid_json_is_an_error(self):
         response = MagicMock()
@@ -93,157 +88,123 @@ class GetJsonTests(SimpleTestCase):
             get_json("https://x.test", opener=MagicMock(return_value=response))
 
 
-class CensusApiTests(SimpleTestCase):
+class AuthorityApiTests(SimpleTestCase):
     def test_filters_on_the_portal_and_pages_through_results(self):
-        pages = [[{"dot_number": "1"}, {"dot_number": "2"}], [{"dot_number": "3"}]]
+        pages = [[record(docket="MC1"), record(docket="MC2")], [record(docket="MC3")]]
         calls = []
 
         def fetch(url, params):
-            calls.append(params)
+            calls.append((url, params))
             return pages[len(calls) - 1]
 
-        rows = list(iter_census_api("WA", page_size=2, fetch=fetch))
-        self.assertEqual([r["dot_number"] for r in rows], ["1", "2", "3"])
-        self.assertEqual([c["$offset"] for c in calls], [0, 2])
-        self.assertEqual(calls[0]["$where"], "phy_state='WA' AND crgo_household='X' AND status_code='A'")
-        self.assertEqual(calls[0]["$order"], "dot_number")
-        # Private columns aren't downloaded.
-        for column in ("email_address", "company_officer_1", "cell_phone"):
-            self.assertNotIn(column, calls[0]["$select"])
+        rows = list(iter_authority_api("wa", page_size=2, fetch=fetch))
+        self.assertEqual([r["docket_number"] for r in rows], ["MC1", "MC2", "MC3"])
+        url, params = calls[0]
+        self.assertEqual(url, "https://data.transportation.gov/resource/6eyk-hxee.json")
+        self.assertEqual(params["$where"], "bus_state_code='WA' AND hhg_chk='Y'")
+        self.assertEqual(params["$order"], "docket_number")
+        self.assertEqual([p["$offset"] for _, p in calls], [0, 2])
+        self.assertNotIn("webKey", params)
 
     def test_stops_on_an_empty_page(self):
         calls = []
 
         def fetch(url, params):
             calls.append(params)
-            return [{"dot_number": "1"}, {"dot_number": "2"}] if len(calls) == 1 else []
+            return [record(), record()] if len(calls) == 1 else []
 
-        self.assertEqual(len(list(iter_census_api("WA", page_size=2, fetch=fetch))), 2)
+        self.assertEqual(len(list(iter_authority_api("WA", page_size=2, fetch=fetch))), 2)
         self.assertEqual(len(calls), 2)
 
     def test_rejects_anything_but_a_state_code(self):
         with self.assertRaises(ValueError):
-            list(iter_census_api("WA' OR 1=1 --", fetch=lambda u, p: []))
+            list(iter_authority_api("WA' OR 1=1 --", fetch=lambda u, p: []))
 
     def test_download_errors_are_reported(self):
         def fetch(url, params):
             raise FMCSAError("HTTP 503")
 
-        with self.assertRaisesMessage(FMCSAError, "Census download failed: HTTP 503"):
-            list(iter_census_api("WA", fetch=fetch))
+        with self.assertRaisesMessage(FMCSAError, "FMCSA download failed: HTTP 503"):
+            list(iter_authority_api("WA", fetch=fetch))
 
 
-class CensusFileTests(SimpleTestCase):
-    def test_reads_a_downloaded_csv_and_applies_the_same_filters(self):
-        csv_text = (
-            "DOT_NUMBER,LEGAL_NAME,PHY_STATE,CRGO_HOUSEHOLD,STATUS_CODE\n"
-            "1,WA MOVER,WA,X,A\n"
-            "2,OREGON MOVER,OR,X,A\n"
-            "3,WA FREIGHT,WA,,A\n"
-            "4,WA INACTIVE,WA,X,I\n"
-            "5,lowercase ok,wa,x,a\n"
-        )
+class AuthorityFileTests(SimpleTestCase):
+    def test_reads_a_csv_export_with_uppercase_headers(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
-            f.write(csv_text)
+            f.write("DOCKET_NUMBER,DOT_NUMBER,LEGAL_NAME,BUS_STATE_CODE,HHG_CHK,COMMON_STAT,CONTRACT_STAT\n"
+                    "MC059073,00008257, HANSEN BROS ,WA,Y,A,A\n")
         self.addCleanup(Path(f.name).unlink)
-        rows = list(iter_census_file(f.name, "WA"))
-        self.assertEqual([r["dot_number"] for r in rows], ["1", "5"])
-        self.assertEqual(rows[0]["legal_name"], "WA MOVER")
+        [row] = list(iter_authority_file(f.name))
+        self.assertEqual(row["docket_number"], "MC059073")
+        self.assertEqual(row["legal_name"], "HANSEN BROS")
+        self.assertTrue(is_active(row))
 
 
-class CensusMcNumberTests(SimpleTestCase):
-    def test_finds_the_mc_docket_in_any_slot(self):
-        self.assertEqual(census_mc_number({"docket1prefix": "MC", "docket1": "123456"}), "123456")
-        self.assertEqual(census_mc_number({"docket1prefix": "FF", "docket1": "9", "docket2prefix": "MC", "docket2": "77"}), "77")
-        self.assertEqual(census_mc_number({"docket1prefix": "FF", "docket1": "9"}), "")
-        self.assertEqual(census_mc_number({}), "")
+class FieldParsingTests(SimpleTestCase):
+    def test_parse_dot(self):
+        self.assertEqual(parse_dot("00008257"), 8257)
+        self.assertEqual(parse_dot(" 42 "), 42)
+        for bad in (None, "", "abc", "0", "-5"):
+            self.assertIsNone(parse_dot(bad), bad)
+
+    def test_mc_number(self):
+        self.assertEqual(mc_number("MC059073"), "59073")
+        self.assertEqual(mc_number("mc-123"), "123")
+        for not_mc in ("FF012345", "MX1", "", None, "MC", "MCABC"):
+            self.assertEqual(mc_number(not_mc), "", not_mc)
+
+    def test_is_active(self):
+        self.assertTrue(is_active({"common_stat": "A", "contract_stat": "N"}))
+        self.assertTrue(is_active({"common_stat": "I", "contract_stat": "A"}))
+        self.assertFalse(is_active({"common_stat": "I", "contract_stat": "N"}))
+        self.assertFalse(is_active({}))
 
 
-class QCMobileParsingTests(SimpleTestCase):
-    def test_carrier_allowed_to_operate(self):
-        self.assertEqual(parse_carrier(fixture("qcmobile_carrier_allowed.json")), (True, True, False))
+class CombineRecordsTests(SimpleTestCase):
+    def test_one_carrier_per_usdot_number(self):
+        combined = combine_records([
+            record(dot="00000001", docket="MC000100"),
+            record(dot="00000001", docket="MC000200"),
+            record(dot="00000002", docket="MC000300"),
+        ], "WA")
+        self.assertEqual(combined.records, 3)
+        self.assertEqual([c.dot_number for c in combined.carriers], [1, 2])
+        self.assertEqual(combined.carriers[0].mc_number, "100")  # lowest MC wins
 
-    def test_carrier_not_allowed_to_operate(self):
-        self.assertEqual(parse_carrier(fixture("qcmobile_carrier_not_allowed.json")), (True, False, False))
+    def test_active_record_wins_over_inactive_ones(self):
+        [carrier] = combine_records([
+            record(docket="MC000100", common="I", legal_name="OLD NAME"),
+            record(docket="MC000200", common="A", legal_name="CURRENT NAME"),
+        ], "WA").carriers
+        self.assertTrue(carrier.authority_active)
+        self.assertEqual(carrier.mc_number, "200")
+        self.assertEqual(carrier.record["legal_name"], "CURRENT NAME")
 
-    def test_carrier_out_of_service(self):
-        self.assertEqual(parse_carrier(fixture("qcmobile_carrier_out_of_service.json")), (True, True, True))
+    def test_carrier_with_only_inactive_records(self):
+        [carrier] = combine_records([record(common="I", contract="I"), record(docket="MC9", common="N", contract="N")], "WA").carriers
+        self.assertFalse(carrier.authority_active)
 
-    def test_unrecognised_carrier_responses_never_qualify(self):
-        for data in (None, {}, [], {"content": None}, {"content": []}, {"content": {"carrier": None}}, "oops"):
-            found, allowed, _ = parse_carrier(data)
-            self.assertFalse(found and allowed, data)
+    def test_freight_forwarders_are_skipped(self):
+        combined = combine_records([
+            record(dot="00000001", docket="FF000100"),
+            record(dot="00000002", docket="FF000200"),
+            record(dot="00000002", docket="MC000300", common="I"),  # MC docket, inactive
+        ], "WA")
+        self.assertEqual(combined.forwarders_skipped, 1)
+        [carrier] = combined.carriers
+        self.assertEqual((carrier.dot_number, carrier.mc_number, carrier.authority_active), (2, "300", False))
 
-    def test_household_goods_in_cargo(self):
-        self.assertTrue(parse_household_goods(fixture("qcmobile_cargo_household_goods.json")))
-        self.assertFalse(parse_household_goods(fixture("qcmobile_cargo_general_freight.json")))
-
-    def test_unrecognised_cargo_responses_never_qualify(self):
-        for data in (None, {}, {"content": None}, {"content": {}}, {"content": ["Household Goods"]}, "oops"):
-            self.assertFalse(parse_household_goods(data), data)
-
-
-class QCMobileClientTests(SimpleTestCase):
-    def make_client(self, responses):
-        calls = []
-
-        def fetch(url, params):
-            calls.append((url, params))
-            return responses[url.rsplit("/", 1)[-1]]
-
-        return QCMobileClient(SECRET, fetch=fetch, base_url="https://qc.test"), calls
-
-    def test_confirms_an_allowed_household_goods_carrier(self):
-        client, calls = self.make_client({
-            "1234567": fixture("qcmobile_carrier_allowed.json"),
-            "cargo-carried": fixture("qcmobile_cargo_household_goods.json"),
-        })
-        check = client.check(1234567)
-        self.assertTrue(check.qualifies)
-        self.assertEqual([url for url, _ in calls], [
-            "https://qc.test/carriers/1234567",
-            "https://qc.test/carriers/1234567/cargo-carried",
-        ])
-        self.assertTrue(all(params == {"webKey": SECRET} for _, params in calls))
-
-    def test_skips_the_cargo_lookup_for_carriers_not_allowed_to_operate(self):
-        client, calls = self.make_client({"1234567": fixture("qcmobile_carrier_not_allowed.json")})
-        check = client.check(1234567)
-        self.assertFalse(check.qualifies)
-        self.assertEqual(check.reason, "not allowed to operate")
-        self.assertEqual(len(calls), 1)
-
-    def test_not_found(self):
-        client, _ = self.make_client({"1234567": None})
-        check = client.check(1234567)
-        self.assertEqual(check, CarrierCheck(found=False))
-        self.assertEqual(check.reason, "not found in QCMobile")
-
-    def test_general_freight_carrier_is_rejected(self):
-        client, _ = self.make_client({
-            "1234567": fixture("qcmobile_carrier_allowed.json"),
-            "cargo-carried": fixture("qcmobile_cargo_general_freight.json"),
-        })
-        self.assertEqual(client.check(1234567).reason, "household goods not listed in cargo carried")
-
-    def test_errors_say_which_lookup_failed_without_the_key(self):
-        def fetch(url, params):
-            raise FMCSAError("HTTP 401")
-
-        client = QCMobileClient(SECRET, fetch=fetch)
-        with self.assertRaises(FMCSAError) as ctx:
-            client.check(1234567)
-        self.assertEqual(str(ctx.exception), "QCMobile carrier lookup failed: HTTP 401")
-        self.assertNotIn(SECRET, str(ctx.exception))
-
-    def test_requires_a_key(self):
-        with self.assertRaises(ValueError):
-            QCMobileClient("")
+    def test_ignores_other_states_non_household_goods_and_missing_usdot(self):
+        combined = combine_records([
+            record(dot="1", bus_state_code="OR"),
+            record(dot="2", hhg_chk="N"),
+            record(dot=""),
+            record(dot="3"),
+        ], "WA")
+        self.assertEqual([c.dot_number for c in combined.carriers], [3])
+        self.assertEqual(combined.records, 2)  # the WA household goods ones
 
 
-class RealUrlTests(SimpleTestCase):
-    """Guards against typos in the live URLs (nothing is fetched)."""
-
-    def test_urls(self):
-        self.assertEqual(fmcsa.CENSUS_API_URL, "https://data.transportation.gov/resource/az4n-8mr2.json")
-        self.assertEqual(fmcsa.QCMOBILE_BASE_URL, "https://mobile.fmcsa.dot.gov/qc/services")
+class UrlTests(SimpleTestCase):
+    def test_dataset_url(self):
+        self.assertEqual(fmcsa.AUTHORITY_API_URL, "https://data.transportation.gov/resource/6eyk-hxee.json")

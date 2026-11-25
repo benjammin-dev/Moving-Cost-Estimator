@@ -1,77 +1,65 @@
 from pathlib import Path
 
-from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from movers.fmcsa import FMCSAError, QCMobileClient, iter_census_api, iter_census_file
+from movers.fmcsa import FMCSAError, check_state, iter_authority_api, iter_authority_file
 from movers.importer import import_movers
 
 
 class Command(BaseCommand):
     help = (
-        "Import household goods movers from FMCSA's Company Census File as "
-        "unclaimed, unverified Mover profiles, confirming each carrier through "
-        "the QCMobile API. Needs FMCSA_WEBKEY in backend/.env. Safe to re-run."
+        "Import household goods movers with active federal authority from FMCSA's "
+        "public 'Carrier - All With History' data as unclaimed, unverified Mover "
+        "profiles. No API key needed. Safe to re-run."
     )
 
     def add_arguments(self, parser):
         parser.add_argument("--state", default="WA", help="Two-letter state code (default: WA).")
-        parser.add_argument("--census-file", metavar="PATH",
-                            help="Read a downloaded Company Census File CSV instead of querying the DOT portal.")
+        parser.add_argument("--file", metavar="PATH",
+                            help="Read a CSV export of the dataset instead of downloading it.")
         parser.add_argument("--limit", type=int, metavar="N",
-                            help="Check at most N carriers. A limited run never deactivates missing carriers.")
-        parser.add_argument("--sleep", type=float, default=0.25, metavar="SECONDS",
-                            help="Pause between carriers, to go easy on QCMobile (default: 0.25).")
-        parser.add_argument("--dry-run", action="store_true", help="Check everything but save nothing.")
+                            help="Process at most N carriers. A limited run never deactivates missing carriers.")
+        parser.add_argument("--dry-run", action="store_true", help="Show what would change, but save nothing.")
 
     def handle(self, *args, **options):
-        webkey = getattr(settings, "FMCSA_WEBKEY", "")
-        if not webkey:
-            raise CommandError("FMCSA_WEBKEY is not set. Add FMCSA_WEBKEY=your-key to backend/.env.")
-        state = options["state"].strip().upper()
-        if not (len(state) == 2 and state.isalpha()):
-            raise CommandError(f"--state must be a two-letter state code, not {options['state']!r}.")
+        try:
+            state = check_state(options["state"].strip())
+        except ValueError:
+            raise CommandError(f"--state must be a two-letter state code, not {options['state']!r}.") from None
         if options["limit"] is not None and options["limit"] < 1:
             raise CommandError("--limit must be at least 1.")
-        if options["sleep"] < 0:
-            raise CommandError("--sleep can't be negative.")
-
-        # Belt and braces: nothing printed may contain the key.
-        def safe(text):
-            return text.replace(webkey, "***")
-
-        def log(message):
-            self.stderr.write(safe(message))
 
         def debug(message):
             if options["verbosity"] >= 2:
-                self.stdout.write(safe(message))
+                self.stdout.write(message)
 
-        path = options["census_file"]
+        path = options["file"]
         if path:
             if not Path(path).is_file():
-                raise CommandError(f"Census file not found: {path}")
-            rows = iter_census_file(path, state)
-            self.stdout.write(f"Reading {path} for active household goods carriers in {state}...")
+                raise CommandError(f"File not found: {path}")
+            self.stdout.write(f"Reading household goods carriers in {state} from {path}...")
+            rows = iter_authority_file(path)
         else:
-            rows = iter_census_api(state)
-            self.stdout.write(f"Downloading active household goods carriers in {state} from the Company Census File...")
+            self.stdout.write(f"Downloading household goods carriers in {state} from FMCSA...")
+            rows = iter_authority_api(state)
 
         try:
             stats = import_movers(
-                rows, QCMobileClient(webkey), state=state, dry_run=options["dry_run"],
-                limit=options["limit"], sleep_seconds=options["sleep"], log=log, debug=debug,
+                rows, state=state, dry_run=options["dry_run"], limit=options["limit"],
+                log=self.stderr.write, debug=debug,
             )
         except FMCSAError as err:
-            raise CommandError(safe(str(err))) from None
+            raise CommandError(str(err)) from None
 
         prefix = "Dry run, nothing saved. " if options["dry_run"] else ""
         self.stdout.write(self.style.SUCCESS(
-            f"{prefix}Checked {stats.candidates} carriers: {stats.confirmed} confirmed "
-            f"({stats.created} new, {stats.updated} updated), {stats.rejected} rejected, "
-            f"{stats.deactivated} set inactive, {stats.errors} errors."
+            f"{prefix}{stats.records} records, {stats.carriers} motor carriers: "
+            f"{stats.created} new, {stats.updated} updated, "
+            f"{stats.inactive_skipped} skipped (no active authority), "
+            f"{stats.deactivated} set inactive, {stats.conflicts} MC conflicts. "
+            f"{stats.forwarders_skipped} freight forwarders skipped."
         ))
-        if stats.errors:
+        if stats.conflicts:
             self.stdout.write(self.style.WARNING(
-                f"{stats.errors} lookups failed and were left unchanged. Re-run to retry them."
+                f"{stats.conflicts} carriers were skipped because their MC number is on another profile. See the messages above."
             ))
