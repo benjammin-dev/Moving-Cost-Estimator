@@ -1,0 +1,7 @@
+{
+  "_placeholder": "Guessed format. Replace with a real QCMobile response before merging.",
+  "content": [
+    {"cargoClassDesc": "General Freight", "id": {"cargoClassId": 1, "dotNumber": 1234567}},
+    {"cargoClassDesc": "Household Goods", "id": {"cargoClassId": 2, "dotNumber": 1234567}}
+  ]
+}

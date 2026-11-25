@@ -1,0 +1,14 @@
+{
+  "_placeholder": "Guessed format. Replace with a real QCMobile response before merging.",
+  "content": {
+    "carrier": {
+      "dotNumber": 1234567,
+      "legalName": "ACME MOVING LLC",
+      "dbaName": "ACME MOVERS",
+      "allowedToOperate": "Y",
+      "oosDate": null,
+      "phyCity": "SEATTLE",
+      "phyState": "WA"
+    }
+  }
+}
