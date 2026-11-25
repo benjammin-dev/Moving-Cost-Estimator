@@ -23,8 +23,10 @@ const withShort = (opts) => opts.map((o) => ({ ...o, short: SHORT_LABELS[o.value
  * The full move-details form, used for both creating and editing.
  * layout="split": form on the left, sticky live quote on the right (create page)
  * layout="stacked": single column with the quote underneath (inline edit)
+ * quoteOnly: price the move without saving - no customer details and no
+ *   save button (public widget, no login)
  */
-function EstimateForm({ initial = EMPTY_FORM, options, submitLabel = "Save Estimate", onSubmit, onCancel, busy = false, layout = "stacked" }) {
+function EstimateForm({ initial = EMPTY_FORM, options, submitLabel = "Save Estimate", onSubmit, onCancel, busy = false, layout = "stacked", quoteOnly = false }) {
     const [form, setForm] = useState(initial)
     const [preview, setPreview] = useState(null)
     const [previewError, setPreviewError] = useState("")
@@ -67,6 +69,7 @@ function EstimateForm({ initial = EMPTY_FORM, options, submitLabel = "Save Estim
 
     const handleSubmit = (e) => {
         e.preventDefault()
+        if (quoteOnly) return
         onSubmit(formToPayload(form), () => {
             setForm(EMPTY_FORM)
             setPreview(null)
@@ -81,7 +84,7 @@ function EstimateForm({ initial = EMPTY_FORM, options, submitLabel = "Save Estim
 
     const sections = (
         <div className="space-y-5">
-            <Section icon={User} title="Customer" split={split}>
+            {!quoteOnly && <Section icon={User} title="Customer" split={split}>
                 <div className="grid gap-4 sm:grid-cols-2">
                     <Field label="Customer name" htmlFor={fid("customer_name")}>
                         <input id={fid("customer_name")} name="customer_name" autoComplete="off" placeholder="e.g. Sarah Chen" className={inputClass} value={form.customer_name} onChange={onChange} required />
@@ -90,7 +93,7 @@ function EstimateForm({ initial = EMPTY_FORM, options, submitLabel = "Save Estim
                         <input id={fid("move_date")} name="move_date" type="date" className={inputClass} value={form.move_date} onChange={onChange} />
                     </Field>
                 </div>
-            </Section>
+            </Section>}
 
             <Section icon={Package} title="Size of the move" description="Weight and crew are worked out for you, or enter your own." split={split}>
                 <div className="grid gap-4 sm:grid-cols-3">
@@ -150,7 +153,7 @@ function EstimateForm({ initial = EMPTY_FORM, options, submitLabel = "Save Estim
         </div>
     )
 
-    const actions = (
+    const actions = quoteOnly ? null : (
         <div className="flex flex-col gap-2">
             <button type="submit" disabled={busy} className={`${buttonClass.primary} w-full py-3`}>
                 {busy ? "Saving…" : submitLabel}
@@ -164,10 +167,10 @@ function EstimateForm({ initial = EMPTY_FORM, options, submitLabel = "Save Estim
     )
 
     return (
-        <form onSubmit={handleSubmit} aria-label={submitLabel} className={split ? "grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px]" : "space-y-5"}>
+        <form onSubmit={handleSubmit} aria-label={quoteOnly ? "Moving quote" : submitLabel} className={split ? "grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px]" : "space-y-5"}>
             {sections}
             <aside className={split ? "lg:sticky lg:top-24" : ""}>
-                <QuotePanel preview={hasSize ? preview : null} error={previewError} compact={!split}>
+                <QuotePanel preview={hasSize ? preview : null} error={previewError} compact={!split} footnote={quoteOnly ? "Estimate only. Moves are billed by the hour, so the final price depends on the time the move actually takes." : null}>
                     {actions}
                 </QuotePanel>
             </aside>
@@ -217,7 +220,7 @@ function AccessSection({ prefix, icon, title, uid, form, set, onChange, parking,
     )
 }
 
-function QuotePanel({ preview, error, compact, children }) {
+function QuotePanel({ preview, error, compact, footnote, children }) {
     const [showBreakdown, setShowBreakdown] = useState(false)
     return (
         <div className={`${cardClass} overflow-hidden`} aria-live="polite">
@@ -258,7 +261,8 @@ function QuotePanel({ preview, error, compact, children }) {
                     </div>
                 )}
             </div>
-            <div className="border-t border-line bg-subtle/50 p-4 sm:px-6">{children}</div>
+            {footnote && <p className="border-t border-line px-5 py-3 text-xs text-ink-3 sm:px-6">{footnote}</p>}
+            {children && <div className="border-t border-line bg-subtle/50 p-4 sm:px-6">{children}</div>}
         </div>
     )
 }

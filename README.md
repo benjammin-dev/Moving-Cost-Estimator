@@ -179,7 +179,7 @@ The pricing engine tests run against a fixed copy of the config, so you can chan
 
 ## API
 
-All endpoints except register and token require a JWT (`Authorization: Bearer <token>`); requests without one get `401 Unauthorized`.
+All endpoints except register, token, and the two public quote endpoints (preview and pricing options) require a JWT (`Authorization: Bearer <token>`); requests without one get `401 Unauthorized`. The public endpoints are rate-limited per IP (`DJANGO_QUOTE_PREVIEW_RATE`, default `120/minute`).
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -187,13 +187,23 @@ All endpoints except register and token require a JWT (`Authorization: Bearer <t
 | `POST` | `/api/token/` · `/api/token/refresh/` | Get / refresh JWT tokens |
 | `GET` | `/api/estimates/?status=open\|completed` | List your estimates |
 | `POST` | `/api/estimates/` | Create an estimate (priced server-side) |
-| `POST` | `/api/estimates/preview/` | Price a move without saving (live quote) |
+| `POST` | `/api/estimates/preview/` | Price a move without saving (live quote). **Public** |
 | `PATCH` | `/api/estimates/update/<id>/` | Edit an estimate (re-priced) |
 | `DELETE` | `/api/estimates/delete/<id>/` | Delete an estimate |
 | `PUT` / `DELETE` | `/api/estimates/<id>/completion/` | Record or clear the move's actual results |
 | `GET` / `POST` | `/api/estimates/<id>/notes/` | List / add notes |
 | `DELETE` | `/api/notes/delete/<id>/` | Delete a note |
-| `GET` | `/api/pricing/options/` | Form choices (parking, packing, special items) |
+| `GET` | `/api/pricing/options/` | Form choices (parking, packing, special items). **Public** |
+
+### Public quote widget
+
+`/widget` is a no-login version of the estimator: customers describe their move and get a live quote, without customer fields or a save button. It has no nav bar, so it can be embedded on another site:
+
+```html
+<iframe src="https://your-app-domain/widget" title="Moving quote" style="width:100%;height:1400px;border:0"></iframe>
+```
+
+It only calls the public preview and options endpoints, so nothing is saved.
 
 ---
 
@@ -211,7 +221,7 @@ backend/
   backend/settings.py   # environment-driven settings
 frontend/
   src/
-    pages/              # Estimate, CompletedMoves, Login, Register
+    pages/              # Estimate, CompletedMoves, QuoteWidget, Login, Register
     components/         # EstimateForm, EstimateCard, Breakdown, controls...
     index.css           # design tokens (light and dark palettes)
     ui.js               # shared styles and formatters

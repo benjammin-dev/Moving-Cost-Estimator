@@ -1,10 +1,12 @@
 from decimal import Decimal
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 
 from .models import CompletedMove, Estimator, Note
@@ -66,7 +68,8 @@ class NoteDelete(generics.DestroyAPIView):
 
 
 # Every view requires a signed-in user (DEFAULT_PERMISSION_CLASSES in
-# settings) except registration, which is open.
+# settings) except registration and the two public quote endpoints
+# (EstimatePreview, PricingOptions) used by the widget.
 class CreateUserView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer
@@ -94,9 +97,25 @@ class EstimateListCreate(generics.ListCreateAPIView):
         serializer.save(user=self.request.user, **price_move(serializer.validated_data))
 
 
+class QuotePreviewThrottle(AnonRateThrottle):
+    """Per-IP limit on the public quote endpoints, so the open widget can't
+    be hammered. Rate comes from settings.QUOTE_PREVIEW_RATE."""
+    scope = "quote_preview"
+
+    def get_rate(self):
+        return settings.QUOTE_PREVIEW_RATE
+
+
 class EstimatePreview(APIView):
     """POST the move details, get the price breakdown back without saving.
-    Powers the live quote on the estimate form."""
+    Powers the live quote on the estimate form and the public widget.
+
+    Public: no login needed, and any token sent is ignored (so a stale token
+    in the browser can't break the widget). Nothing is saved or read from
+    the database here."""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [QuotePreviewThrottle]
 
     def post(self, request):
         serializer = EstimatePreviewSerializer(data=request.data)
@@ -106,7 +125,11 @@ class EstimatePreview(APIView):
 
 
 class PricingOptions(APIView):
-    """Choice lists (parking, packing, special items) for the form."""
+    """Choice lists (parking, packing, special items) for the form.
+    Public, like EstimatePreview, because the widget needs them."""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [QuotePreviewThrottle]
 
     def get(self, request):
         return Response(options())

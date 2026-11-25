@@ -44,6 +44,13 @@ REST_FRAMEWORK = {
     ),
 }
 
+# Per-IP rate limit for the public quote endpoints (live quote preview and
+# pricing options) used by the no-login widget. The form re-prices ~300 ms
+# after typing stops, so a real user makes a few dozen calls per quote.
+# The throttle counts in Django's cache, which defaults to per-process memory;
+# use a shared cache (e.g. Redis) to make it exact across gunicorn workers.
+QUOTE_PREVIEW_RATE = os.environ.get('DJANGO_QUOTE_PREVIEW_RATE', '120/minute')
+
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
