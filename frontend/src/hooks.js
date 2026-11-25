@@ -15,6 +15,20 @@ export function usePricingOptions(onError) {
     return options
 }
 
+// The signed-in user ({ username, is_staff }), or null while loading or if
+// it can't be loaded. Used to show staff-only links.
+export function useCurrentUser() {
+    const [user, setUser] = useState(null)
+    useEffect(() => {
+        let cancelled = false
+        api.get("/api/user/me/")
+            .then((res) => { if (!cancelled) setUser(res.data) })
+            .catch(() => {})
+        return () => { cancelled = true }
+    }, [])
+    return user
+}
+
 // Loads estimates with the given status ("open" or "completed") and gives
 // helpers to keep the list in sync as cards change.
 export function useEstimates(status, onError) {

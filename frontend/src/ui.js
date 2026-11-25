@@ -58,3 +58,19 @@ export function errorMessage(err, fallback = "Something went wrong.") {
     }
     return fallback
 }
+
+// Timestamps from the API ("2026-11-25T18:04:00Z") -> "Nov 25, 2026, 10:04 AM".
+export function formatDateTime(value) {
+    if (!value) return "-"
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return "-"
+    return date.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })
+}
+
+// "2065550100" -> "(206) 555-0100". Anything else is shown as stored.
+export function formatPhone(value) {
+    const digits = String(value || "").replace(/\D/g, "")
+    const local = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits
+    if (local.length === 10) return `(${local.slice(0, 3)}) ${local.slice(3, 6)}-${local.slice(6)}`
+    return value || "-"
+}

@@ -3,9 +3,10 @@ import EstimateList from "../components/EstimateList"
 import NavBar from "../components/NavBar"
 import Notice from "../components/Notice"
 import PageHeader from "../components/PageHeader"
+import Stat from "../components/Stat"
 import { accuracyStats } from "../estimates"
 import { useEstimates, usePricingOptions } from "../hooks"
-import { eyebrowClass, formatMoney } from "../ui"
+import { formatMoney } from "../ui"
 
 function CompletedMoves() {
     const [error, setError] = useState("")
@@ -63,16 +64,6 @@ function CompletedMoves() {
                 />
             </main>
         </>
-    )
-}
-
-function Stat({ label, value, note }) {
-    return (
-        <div className="bg-surface p-5 sm:p-6">
-            <div className={eyebrowClass}>{label}</div>
-            <div className="mt-2 font-display text-4xl leading-none tracking-tight text-ink tabular-nums">{value}</div>
-            {note && <div className="mt-2 text-xs text-ink-3">{note}</div>}
-        </div>
     )
 }
 
