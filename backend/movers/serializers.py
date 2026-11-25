@@ -15,11 +15,53 @@ class MoverSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "dba_name", "usdot_number", "mc_number",
             "street", "city", "state", "zip_code", "phone",
-            "utc_permit_number", "status", "claimed", "google_place_id",
+            "utc_permit_number", "status", "source", "claimed", "google_place_id",
             "fmcsa_authority_active", "fmcsa_synced_at",
+            "utc_company_id", "utc_status", "utc_synced_at",
             "is_bookable", "created_at", "updated_at",
         ]
         read_only_fields = fields
+
+
+class MoverCreateSerializer(serializers.ModelSerializer):
+    """Staff adding a mover that isn't in the FMCSA or UTC data. It starts
+    unverified; verify it on its page once the permit is checked."""
+
+    class Meta:
+        model = Mover
+        fields = ["name", "dba_name", "usdot_number", "mc_number", "street", "city", "state", "zip_code", "phone"]
+        extra_kwargs = {"state": {"required": False}}
+
+    def validate_name(self, value):
+        value = " ".join(value.split())
+        if not value:
+            raise serializers.ValidationError("Enter the company's name.")
+        return value
+
+    def validate_mc_number(self, value):
+        value = re.sub(r"^MC-?", "", (value or "").strip().upper()).lstrip("0")
+        if value and not value.isdigit():
+            raise serializers.ValidationError("Use the number only, e.g. 123456.")
+        if value and Mover.objects.filter(mc_number=value).exists():
+            raise serializers.ValidationError("Another mover already has this MC number.")
+        return value
+
+    def validate_usdot_number(self, value):
+        if value is not None and Mover.objects.filter(usdot_number=value).exists():
+            raise serializers.ValidationError("Another mover already has this USDOT number.")
+        return value
+
+    def validate_state(self, value):
+        value = (value or "").strip().upper()
+        if value and not (len(value) == 2 and value.isalpha()):
+            raise serializers.ValidationError("Use the two-letter state code, e.g. WA.")
+        return value
+
+    def create(self, validated_data):
+        validated_data.setdefault("state", "WA")
+        for field in ("dba_name", "street", "city", "zip_code", "phone"):
+            validated_data[field] = " ".join((validated_data.get(field) or "").split())
+        return Mover.objects.create(source=Mover.Source.STAFF, status=Mover.Status.UNVERIFIED, **validated_data)
 
 
 class MoverUpdateSerializer(serializers.ModelSerializer):
@@ -62,7 +104,7 @@ class ImportRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = ImportRun
         fields = [
-            "id", "started_at", "finished_at", "state", "source", "dry_run",
+            "id", "kind", "started_at", "finished_at", "state", "source", "dry_run",
             "triggered_by", "succeeded", "error", "stats", "messages",
         ]
 

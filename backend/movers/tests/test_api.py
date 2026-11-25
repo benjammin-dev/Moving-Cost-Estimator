@@ -159,14 +159,17 @@ class SummaryTests(StaffApiTestCase):
         make_mover(1)
         make_mover(2, status=Mover.Status.VERIFIED, utc_permit_number="HG2", claimed=True)
         make_mover(3, status=Mover.Status.INACTIVE)
+        Mover.objects.filter(usdot_number=2).update(utc_status="Active")
         ImportRun.objects.create(state="WA", source="old", succeeded=True)
         latest = ImportRun.objects.create(state="WA", source="new", succeeded=True, stats={"created": 2})
+        utc_run = ImportRun.objects.create(kind="utc", state="WA", source="utc", succeeded=True)
         data = self.client.get("/api/movers/summary/").data
-        self.assertEqual(data["counts"], {"total": 3, "unverified": 1, "verified": 1, "inactive": 1, "claimed": 1, "bookable": 1})
-        self.assertEqual(data["latest_import"]["id"], latest.id)
+        self.assertEqual(data["counts"], {"total": 3, "unverified": 1, "verified": 1, "inactive": 1, "claimed": 1, "bookable": 1, "utc_active": 1})
+        self.assertEqual(data["latest_imports"]["fmcsa"]["id"], latest.id)
+        self.assertEqual(data["latest_imports"]["utc"]["id"], utc_run.id)
 
     def test_no_imports_yet(self):
-        self.assertIsNone(self.client.get("/api/movers/summary/").data["latest_import"])
+        self.assertEqual(self.client.get("/api/movers/summary/").data["latest_imports"], {"fmcsa": None, "utc": None})
 
 
 class ImportRunTests(StaffApiTestCase):
@@ -174,8 +177,10 @@ class ImportRunTests(StaffApiTestCase):
 
     def test_run_an_import_from_the_page(self):
         with patch(DOWNLOAD, return_value=iter(self.rows)):
-            response = self.client.post("/api/movers/imports/", {"dry_run": False}, format="json")
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+            response = self.client.post("/api/movers/imports/", {"kind": "fmcsa", "dry_run": False}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data["kind"], "fmcsa")
+        self.assertIsNotNone(response.data["finished_at"])  # tests run imports inline
         self.assertTrue(response.data["succeeded"])
         self.assertEqual(response.data["triggered_by"], "staff")
         self.assertEqual(response.data["stats"]["created"], 1)
@@ -197,8 +202,9 @@ class ImportRunTests(StaffApiTestCase):
 
         with patch(DOWNLOAD, side_effect=failing):
             response = self.client.post("/api/movers/imports/", {}, format="json")
-        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
-        self.assertIn("HTTP 503", response.data["detail"])
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertFalse(response.data["succeeded"])
+        self.assertIn("HTTP 503", response.data["error"])
         run = ImportRun.objects.get()
         self.assertFalse(run.succeeded)
         self.assertIn("HTTP 503", run.error)
@@ -223,3 +229,77 @@ class ImportRunTests(StaffApiTestCase):
         listed = self.client.get("/api/movers/imports/").data
         self.assertEqual([r["id"] for r in listed], [run.id])
         self.assertIsNone(listed[0]["triggered_by"])
+
+
+class ImportControlTests(StaffApiTestCase):
+    def test_refuses_a_second_run_of_the_same_kind_while_one_is_going(self):
+        ImportRun.objects.create(kind="utc", state="WA", source="utc")  # unfinished
+        response = self.client.post("/api/movers/imports/", {"kind": "utc"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(ImportRun.objects.count(), 1)
+
+    def test_a_stale_unfinished_run_does_not_block(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        stale = ImportRun.objects.create(kind="fmcsa", state="WA", source="x")
+        ImportRun.objects.filter(pk=stale.pk).update(started_at=timezone.now() - timedelta(hours=3))
+        with patch(DOWNLOAD, return_value=iter([])):
+            response = self.client.post("/api/movers/imports/", {"kind": "fmcsa"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+    def test_unknown_kind(self):
+        response = self.client.post("/api/movers/imports/", {"kind": "google"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class AddMoverTests(StaffApiTestCase):
+    def test_staff_can_add_a_mover_without_a_usdot_number(self):
+        response = self.client.post("/api/movers/", {
+            "name": "  Aaron   Glide Moving ", "city": "Seattle", "phone": "425-745-9047", "mc_number": "MC-00123",
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        mover = Mover.objects.get()
+        self.assertEqual((mover.name, mover.state, mover.mc_number), ("Aaron Glide Moving", "WA", "123"))
+        self.assertIsNone(mover.usdot_number)
+        self.assertEqual((mover.source, mover.status, mover.claimed), ("staff", "unverified", False))
+        self.assertEqual(response.data["source"], "staff")
+
+    def test_validation(self):
+        make_mover(8257, mc_number="59073")
+        for data, field in [
+            ({"name": "  "}, "name"),
+            ({"name": "Dup", "usdot_number": 8257}, "usdot_number"),
+            ({"name": "Dup", "mc_number": "MC059073"}, "mc_number"),
+            ({"name": "Bad", "mc_number": "ABC"}, "mc_number"),
+            ({"name": "Bad", "state": "Washington"}, "state"),
+        ]:
+            with self.subTest(data=data):
+                response = self.client.post("/api/movers/", data, format="json")
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn(field, response.data)
+
+    def test_cannot_set_status_or_permit_when_adding(self):
+        self.client.post("/api/movers/", {"name": "Sneaky", "status": "verified", "utc_permit_number": "HG1", "source": "utc"}, format="json")
+        mover = Mover.objects.get()
+        self.assertEqual((mover.status, mover.utc_permit_number, mover.source), ("unverified", None, "staff"))
+
+    def test_regular_users_cannot_add(self):
+        self.client.force_authenticate(self.regular)
+        self.assertEqual(self.client.post("/api/movers/", {"name": "X"}, format="json").status_code, status.HTTP_403_FORBIDDEN)
+
+
+class UtcFilterTests(StaffApiTestCase):
+    def test_filter_by_utc_status_and_source(self):
+        make_mover(1, name="PERMITTED", utc_status="Active", source="utc")
+        make_mover(2, name="UNREGULATED", utc_status="Unregulated", source="utc")
+        make_mover(3, name="NOT ON LIST", source="fmcsa")
+        names = lambda q: [m["name"] for m in self.client.get(f"/api/movers/?{q}").data["results"]]
+        self.assertEqual(names("utc=active"), ["PERMITTED"])
+        self.assertEqual(names("utc=not_permitted"), ["UNREGULATED"])
+        self.assertEqual(names("utc=none"), ["NOT ON LIST"])
+        self.assertEqual(names("source=fmcsa"), ["NOT ON LIST"])
+
+    def test_search_by_permit_number(self):
+        make_mover(1, name="GENTLE GIANT", utc_permit_number="HG060620")
+        self.assertEqual([m["name"] for m in self.client.get("/api/movers/?search=hg060620").data["results"]], ["GENTLE GIANT"])

@@ -8,12 +8,9 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .fmcsa import FMCSAError
 from .models import ImportRun, Mover
-from .serializers import ImportRunSerializer, MoverSerializer, MoverUpdateSerializer
-from .services import run_import
-
-IMPORT_STATE = "WA"
+from .serializers import ImportRunSerializer, MoverCreateSerializer, MoverSerializer, MoverUpdateSerializer
+from .services import ImportAlreadyRunning, start_import
 
 
 class MoverPagination(PageNumberPagination):
@@ -21,20 +18,33 @@ class MoverPagination(PageNumberPagination):
 
 
 def search_filter(query):
-    """Name, DBA or city; or a USDOT / MC number ("8257", "MC59073")."""
+    """Name, DBA, city or UTC permit; or a USDOT / MC number ("8257", "MC59073")."""
     query = query.strip()
-    match = Q(name__icontains=query) | Q(dba_name__icontains=query) | Q(city__icontains=query)
+    match = (
+        Q(name__icontains=query) | Q(dba_name__icontains=query) | Q(city__icontains=query)
+        | Q(utc_permit_number__iexact=query)
+    )
     digits = query.upper().removeprefix("MC").lstrip("- ").lstrip("0")
     if digits.isdigit() and len(digits) <= 10:
         match |= Q(mc_number=digits) | Q(usdot_number=int(digits))
     return match
 
 
-class MoverList(generics.ListAPIView):
-    """GET /api/movers/?search=&status=&claimed=true|false&authority=active|lapsed&page="""
-    serializer_class = MoverSerializer
+class MoverList(generics.ListCreateAPIView):
+    """GET /api/movers/?search=&status=&claimed=true|false&authority=active|lapsed
+    &utc=active|not_permitted|none&source=fmcsa|utc|staff&page=
+    POST /api/movers/ adds a mover (staff)."""
     permission_classes = [IsAdminUser]
     pagination_class = MoverPagination
+
+    def get_serializer_class(self):
+        return MoverCreateSerializer if self.request.method == "POST" else MoverSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = MoverCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        mover = serializer.save()
+        return Response(MoverSerializer(mover).data, status=status.HTTP_201_CREATED)
 
     def get_queryset(self):
         qs = Mover.objects.all()
@@ -49,7 +59,15 @@ class MoverList(generics.ListAPIView):
             qs = qs.filter(fmcsa_authority_active=True)
         elif params.get("authority") == "lapsed":
             qs = qs.filter(fmcsa_authority_active=False)
-        return qs.order_by("name", "usdot_number")
+        if params.get("utc") == "active":
+            qs = qs.filter(utc_status="Active")
+        elif params.get("utc") == "not_permitted":
+            qs = qs.exclude(utc_status="").exclude(utc_status="Active")
+        elif params.get("utc") == "none":
+            qs = qs.filter(utc_status="")
+        if params.get("source") in Mover.Source.values:
+            qs = qs.filter(source=params["source"])
+        return qs.order_by("name", "id")
 
 
 class MoverDetail(generics.RetrieveUpdateAPIView):
@@ -70,7 +88,7 @@ class MoverDetail(generics.RetrieveUpdateAPIView):
 
 
 class MoverSummary(APIView):
-    """Counts for the summary tiles, plus the latest import."""
+    """Counts for the summary tiles, plus the latest import of each kind."""
     permission_classes = [IsAdminUser]
 
     def get(self, request):
@@ -81,28 +99,31 @@ class MoverSummary(APIView):
             inactive=Count("id", filter=Q(status=Mover.Status.INACTIVE)),
             claimed=Count("id", filter=Q(claimed=True)),
             bookable=Count("id", filter=Q(status=Mover.Status.VERIFIED) & Q(utc_permit_number__isnull=False) & ~Q(utc_permit_number="")),
+            utc_active=Count("id", filter=Q(utc_status="Active")),
         )
-        latest = ImportRun.objects.first()
-        return Response({
-            "counts": counts,
-            "latest_import": ImportRunSerializer(latest).data if latest else None,
-        })
+        latest = {}
+        for kind in ImportRun.Kind.values:
+            run = ImportRun.objects.filter(kind=kind).first()
+            latest[kind] = ImportRunSerializer(run).data if run else None
+        return Response({"counts": counts, "latest_imports": latest})
 
 
 class ImportRuns(APIView):
-    """GET: the 10 most recent imports. POST {"dry_run": bool}: run one now."""
+    """GET: the 10 most recent imports. POST {"kind": "fmcsa"|"utc", "dry_run": bool}:
+    start one. It runs in the background; poll the summary for finished_at."""
     permission_classes = [IsAdminUser]
 
     def get(self, request):
         return Response(ImportRunSerializer(ImportRun.objects.all()[:10], many=True).data)
 
     def post(self, request):
+        kind = request.data.get("kind", ImportRun.Kind.FMCSA)
+        if kind not in ImportRun.Kind.values:
+            return Response({"kind": [f"Choose one of: {', '.join(ImportRun.Kind.values)}."]}, status=status.HTTP_400_BAD_REQUEST)
         dry_run = request.data.get("dry_run") in (True, "true", "1", 1)
         try:
-            run, _ = run_import(state=IMPORT_STATE, dry_run=dry_run, triggered_by=request.user)
-        except FMCSAError as err:
-            return Response(
-                {"detail": f"The import couldn't reach FMCSA ({err}). Try again in a few minutes."},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-        return Response(ImportRunSerializer(run).data, status=status.HTTP_201_CREATED)
+            run = start_import(kind, dry_run=dry_run, triggered_by=request.user)
+        except ImportAlreadyRunning:
+            return Response({"detail": "That import is already running. Wait for it to finish."}, status=status.HTTP_409_CONFLICT)
+        run.refresh_from_db()
+        return Response(ImportRunSerializer(run).data, status=status.HTTP_202_ACCEPTED)
