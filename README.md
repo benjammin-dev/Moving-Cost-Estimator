@@ -200,8 +200,12 @@ All endpoints except register, token, and the two public quote endpoints (previe
 `/widget` is a no-login version of the estimator: customers describe their move and get a live quote, without customer fields or a save button. It has no nav bar, so it can be embedded on another site:
 
 ```html
-<iframe src="https://your-app-domain/widget" title="Moving quote" style="width:100%;height:1400px;border:0"></iframe>
+<iframe src="https://your-app-domain/widget" title="Moving quote" data-moving-quote
+        style="width:100%;height:1400px;border:0"></iframe>
+<script src="https://your-app-domain/embed.js" async></script>
 ```
+
+`embed.js` resizes the iframe to fit the form as it grows and shrinks (for example when the breakdown opens), so there's no inner scrollbar. The `1400px` is just a fallback until the widget reports its height. It only accepts height messages from `data-moving-quote` iframes, and only from the widget's own origin.
 
 It only calls the public preview and options endpoints, so nothing is saved.
 

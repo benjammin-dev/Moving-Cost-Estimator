@@ -42,3 +42,30 @@ export function useEstimates(status, onError) {
 
     return { estimates, loading, replace, remove, add }
 }
+
+// Message the widget sends to the page embedding it. public/embed.js
+// listens for it, so keep the two in sync.
+export const RESIZE_MESSAGE = "moving-quote:resize"
+
+// When this page is shown inside an <iframe>, tell the parent page how tall
+// `ref`'s element is whenever it changes, so embed.js can size the iframe to
+// fit. Measure a content wrapper, not the document: body has min-height:
+// 100vh, so the document would never report a height smaller than the frame.
+export function useReportHeight(ref) {
+    useEffect(() => {
+        const el = ref.current
+        if (!el || window.parent === window || typeof ResizeObserver === "undefined") return
+        let last = 0
+        const report = () => {
+            const height = Math.ceil(el.getBoundingClientRect().height)
+            if (!height || height === last) return
+            last = height
+            // Only a height is sent, nothing private, so any parent origin is fine.
+            window.parent.postMessage({ type: RESIZE_MESSAGE, height }, "*")
+        }
+        const observer = new ResizeObserver(report)
+        observer.observe(el)
+        report()
+        return () => observer.disconnect()
+    }, [ref])
+}

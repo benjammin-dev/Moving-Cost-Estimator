@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import QuoteWidget from '../QuoteWidget'
 import api from '../../api'
@@ -52,5 +52,55 @@ describe('QuoteWidget', () => {
     expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument()
     expect(api.post).not.toHaveBeenCalledWith('/api/estimates/', expect.anything())
     expect(api.get).not.toHaveBeenCalledWith(expect.stringMatching(/^\/api\/estimates/))
+  })
+})
+
+describe('QuoteWidget inside an iframe', () => {
+  let parentPostMessage
+  let observerCallback
+  let height
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    api.get.mockResolvedValue({ data: OPTIONS })
+    api.post.mockResolvedValue({ data: BREAKDOWN })
+    height = 900
+    parentPostMessage = vi.fn()
+    vi.spyOn(window, 'parent', 'get').mockReturnValue({ postMessage: parentPostMessage })
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ height }))
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(cb) { observerCallback = cb }
+      observe() {}
+      disconnect() {}
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('reports its height to the parent page, and again when it changes', async () => {
+    renderWidget()
+    expect(parentPostMessage).toHaveBeenCalledWith({ type: 'moving-quote:resize', height: 900 }, '*')
+
+    height = 1250.4
+    act(() => observerCallback())
+    expect(parentPostMessage).toHaveBeenLastCalledWith({ type: 'moving-quote:resize', height: 1251 }, '*')
+
+    // Unchanged height: no extra message.
+    act(() => observerCallback())
+    expect(parentPostMessage).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('QuoteWidget outside an iframe', () => {
+  it('does not post its height', () => {
+    vi.clearAllMocks()
+    api.get.mockResolvedValue({ data: OPTIONS })
+    const spy = vi.spyOn(window, 'postMessage')
+    renderWidget()
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
   })
 })
