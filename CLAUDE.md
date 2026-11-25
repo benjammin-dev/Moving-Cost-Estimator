@@ -5,7 +5,7 @@ Moving Cost Estimator: a Django REST + React app that prices local moves by the 
 ## Layout
 
 - `backend/`: Django + DRF + Simple JWT. Two apps, `api/` (estimates) and `movers/` (mover profiles).
-  - `movers/`: the `Mover` model and `manage.py import_fmcsa_movers`, which imports household goods movers from FMCSA's public "Carrier – All With History" dataset (`6eyk-hxee`, no API key). `fmcsa.py` downloads and combines the records, and `importer.py` has the import rules. The dataset is a May 2026 snapshot that FMCSA no longer updates. Tests use sample records and never call FMCSA.
+  - `movers/`: the `Mover` model and `manage.py import_fmcsa_movers`, which imports household goods movers from FMCSA's public "Carrier – All With History" dataset (`6eyk-hxee`, no API key). `fmcsa.py` downloads and combines the records, and `importer.py` has the import rules. `services.run_import` runs an import and records it as an `ImportRun`; the command and the Movers page both use it. The movers API (`views.py`) is staff only (`IsAdminUser`), because anyone can register an account; PATCH only changes `utc_permit_number` and `status`. The dataset is a May 2026 snapshot that FMCSA no longer updates. Tests use sample records and never call FMCSA.
   - `api/pricing.py`: the pricing engine and the `PRICING` config dict.
   - `api/models.py`: `Estimator` (an estimate), `CompletedMove`, `Note`.
   - `api/views.py`: `price_move()` is the single place views call the engine. Estimates are always priced server-side.
@@ -13,7 +13,7 @@ Moving Cost Estimator: a Django REST + React app that prices local moves by the 
   - `api/serializers.py`: input validation. `price`, `estimated_hours` and `breakdown` are computed and never accepted from the client.
   - `api/tests.py` (API) and `api/test_pricing.py` (engine unit tests).
   - `backend/settings.py`: everything comes from env vars or `backend/.env`.
-- `frontend/`: React 19, Vite, Tailwind v4, Vitest. `/widget` (`src/pages/QuoteWidget.jsx`) is the public, embeddable quote page. It uses `EstimateForm` with `quoteOnly`, which has no customer fields and no save. When it's embedded, `useReportHeight` (in `src/hooks.js`) posts a `moving-quote:resize` message with its height, and `public/embed.js` on the host page uses it to size the iframe. If you change the message, change both files. All other routes are wrapped in `ProtectedRoute`. Pages in `src/pages/`, components in `src/components/`, tests in `__tests__/` next to them. Design tokens are in `src/index.css`.
+- `frontend/`: React 19, Vite, Tailwind v4, Vitest. `/widget` (`src/pages/QuoteWidget.jsx`) is the public, embeddable quote page. It uses `EstimateForm` with `quoteOnly`, which has no customer fields and no save. When it's embedded, `useReportHeight` (in `src/hooks.js`) posts a `moving-quote:resize` message with its height, and `public/embed.js` on the host page uses it to size the iframe. If you change the message, change both files. All other routes are wrapped in `ProtectedRoute`. `/movers` and `/movers/:id` are staff-only pages: the nav link is shown only when `/api/user/me/` says `is_staff`, and the pages show `StaffOnly` on a 403. Pages in `src/pages/`, components in `src/components/`, tests in `__tests__/` next to them. Design tokens are in `src/index.css`.
 - `docker-compose.yml`: Postgres, gunicorn backend, nginx frontend.
 
 ## Running it

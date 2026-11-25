@@ -159,11 +159,28 @@ Before deploying anywhere public, edit `.env` to set a real `DJANGO_SECRET_KEY` 
 - A `DJANGO_SECRET_KEY` is required whenever `DEBUG` is off.
 - Only the listed hosts and CORS origins are allowed.
 
+### Movers directory (staff only)
+
+Staff accounts get a **Movers** link in the top bar. It opens a directory of mover profiles with:
+- counts (unverified, verified, bookable, inactive and claimed)
+- search by name, city, USDOT or MC number, with filters
+- each mover's company and federal details, and a link to FMCSA's public SAFER snapshot
+- a verification panel to record the UTC permit number and set the status
+- the latest FMCSA import, with a button to preview or run a new one
+
+Other accounts see a "Staff only" message, and the API refuses them.
+
+To give an account staff access, run this from `backend/` (replace `USERNAME`):
+
+```bash
+python manage.py shell -c "from django.contrib.auth.models import User; User.objects.filter(username='USERNAME').update(is_staff=True)"
+```
+
 ### Importing movers from FMCSA
 
 `import_fmcsa_movers` builds mover profiles from FMCSA's free public [Carrier – All With History](https://catalog.data.gov/dataset/carrier-all-with-history) data. No API key is needed. It imports carriers based in the state that have household goods authority, and only motor carriers (MC numbers) with **active** common or contract authority count. Freight forwarders are skipped, and a carrier listed under several dockets becomes one profile. New profiles start **unclaimed** and **unverified**, and can't be booked until a UTC permit number is verified.
 
-Run it from `backend/`:
+Run it from the **Movers** page (Preview import / Run import), or from `backend/`:
 
 ```bash
 python manage.py import_fmcsa_movers --dry-run   # see what would change; saves nothing
@@ -211,6 +228,11 @@ All endpoints except register, token, and the two public quote endpoints (previe
 | `GET` / `POST` | `/api/estimates/<id>/notes/` | List / add notes |
 | `DELETE` | `/api/notes/delete/<id>/` | Delete a note |
 | `GET` | `/api/pricing/options/` | Form choices (parking, packing, special items). **Public** |
+| `GET` | `/api/user/me/` | The signed-in user's username and staff status |
+| `GET` | `/api/movers/?search=&status=&claimed=&authority=&page=` | List mover profiles, 25 per page. **Staff only** |
+| `GET` | `/api/movers/summary/` | Mover counts and the latest import. **Staff only** |
+| `GET` / `PATCH` | `/api/movers/<id>/` | A mover's profile; PATCH sets `utc_permit_number` and `status` only. **Staff only** |
+| `GET` / `POST` | `/api/movers/imports/` | Recent imports / run one (`{"dry_run": true}` to preview). **Staff only** |
 
 ### Public quote widget
 
@@ -243,12 +265,14 @@ backend/
     models.py           # Mover profiles (unclaimed / unverified / verified / inactive)
     fmcsa.py            # reads and combines FMCSA authority records
     importer.py         # import rules
+    services.py         # runs an import and records it (ImportRun)
+    views.py            # staff-only movers API
     management/commands/import_fmcsa_movers.py
     tests/
   backend/settings.py   # environment-driven settings
 frontend/
   src/
-    pages/              # Estimate, CompletedMoves, QuoteWidget, Login, Register
+    pages/              # Estimate, CompletedMoves, Movers, MoverDetail, QuoteWidget, Login, Register
     components/         # EstimateForm, EstimateCard, Breakdown, controls...
     index.css           # design tokens (light and dark palettes)
     ui.js               # shared styles and formatters
