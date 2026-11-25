@@ -12,7 +12,7 @@ Moving Cost Estimator: a Django REST + React app that prices local moves by the 
   - `api/serializers.py`: input validation. `price`, `estimated_hours` and `breakdown` are computed and never accepted from the client.
   - `api/tests.py` (API) and `api/test_pricing.py` (engine unit tests).
   - `backend/settings.py`: everything comes from env vars or `backend/.env`.
-- `frontend/`: React 19, Vite, Tailwind v4, Vitest. `/widget` (`src/pages/QuoteWidget.jsx`) is the public, embeddable quote page. It uses `EstimateForm` with `quoteOnly`, which has no customer fields and no save. All other routes are wrapped in `ProtectedRoute`. Pages in `src/pages/`, components in `src/components/`, tests in `__tests__/` next to them. Design tokens are in `src/index.css`.
+- `frontend/`: React 19, Vite, Tailwind v4, Vitest. `/widget` (`src/pages/QuoteWidget.jsx`) is the public, embeddable quote page. It uses `EstimateForm` with `quoteOnly`, which has no customer fields and no save. When it's embedded, `useReportHeight` (in `src/hooks.js`) posts a `moving-quote:resize` message with its height, and `public/embed.js` on the host page uses it to size the iframe. If you change the message, change both files. All other routes are wrapped in `ProtectedRoute`. Pages in `src/pages/`, components in `src/components/`, tests in `__tests__/` next to them. Design tokens are in `src/index.css`.
 - `docker-compose.yml`: Postgres, gunicorn backend, nginx frontend.
 
 ## Running it
