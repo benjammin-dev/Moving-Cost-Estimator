@@ -4,7 +4,8 @@ Moving Cost Estimator: a Django REST + React app that prices local moves by the 
 
 ## Layout
 
-- `backend/`: Django 5 + DRF + Simple JWT. One app, `api/`.
+- `backend/`: Django + DRF + Simple JWT. Two apps, `api/` (estimates) and `movers/` (mover profiles).
+  - `movers/`: the `Mover` model and `manage.py import_fmcsa_movers`, which imports household goods movers from FMCSA's public "Carrier – All With History" dataset (`6eyk-hxee`, no API key). `fmcsa.py` downloads and combines the records, and `importer.py` has the import rules. The dataset is a May 2026 snapshot that FMCSA no longer updates. Tests use sample records and never call FMCSA.
   - `api/pricing.py`: the pricing engine and the `PRICING` config dict.
   - `api/models.py`: `Estimator` (an estimate), `CompletedMove`, `Note`.
   - `api/views.py`: `price_move()` is the single place views call the engine. Estimates are always priced server-side.
@@ -43,7 +44,7 @@ Without `DJANGO_DEBUG=True`, settings refuse to load unless `DJANGO_SECRET_KEY` 
 ## Testing
 
 ```bash
-cd backend && source venv/bin/activate && python manage.py test api
+cd backend && source venv/bin/activate && python manage.py test
 cd frontend && npm test            # vitest run
 cd frontend && npm run lint        # eslint
 ```
@@ -55,7 +56,7 @@ cd frontend && npm run lint        # eslint
 
 1. **All pricing lives in `backend/api/pricing.py`.** Rates, fees, minimums, multipliers, thresholds and pricing rules go in `PRICING` or the functions in that file. Do not hard-code prices or pricing math in views, serializers, models or the frontend. The frontend only shows what the API returns, and form choices come from `/api/pricing/options/`.
 2. **Never commit `.env` files.** This covers `.env`, `backend/.env`, `frontend/.env` and any other real env file. Only `*.example` templates are committed. Check `git status` before committing, and never use `git add -f` on an env file.
-3. **Always run the backend and frontend tests before committing.** Run `python manage.py test api` and `npm test`, and also `npm run lint`. Don't commit if anything fails.
+3. **Always run the backend and frontend tests before committing.** Run `python manage.py test` (all backend apps) and `npm test`, and also `npm run lint`. Don't commit if anything fails.
 4. Pricing changes apply to new and edited estimates only. Saved estimates keep their stored `breakdown` until they are edited. Don't write migrations or scripts that silently re-price saved quotes.
 
 ## Washington regulatory rules

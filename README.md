@@ -159,21 +159,38 @@ Before deploying anywhere public, edit `.env` to set a real `DJANGO_SECRET_KEY` 
 - A `DJANGO_SECRET_KEY` is required whenever `DEBUG` is off.
 - Only the listed hosts and CORS origins are allowed.
 
+### Importing movers from FMCSA
+
+`import_fmcsa_movers` builds mover profiles from FMCSA's free public [Carrier – All With History](https://catalog.data.gov/dataset/carrier-all-with-history) data. No API key is needed. It imports carriers based in the state that have household goods authority, and only motor carriers (MC numbers) with **active** common or contract authority count. Freight forwarders are skipped, and a carrier listed under several dockets becomes one profile. New profiles start **unclaimed** and **unverified**, and can't be booked until a UTC permit number is verified.
+
+Run it from `backend/`:
+
+```bash
+python manage.py import_fmcsa_movers --dry-run   # see what would change; saves nothing
+python manage.py import_fmcsa_movers             # import (Washington by default)
+```
+
+Options: `--state XX` (default `WA`), `--file PATH` (read a CSV export of the dataset instead of downloading it), `--limit N`, `--dry-run`, and `-v 2` to log every carrier.
+
+It's safe to re-run. Existing profiles are updated, never duplicated, and claimed profiles keep the mover's own details. If a carrier's authority lapses or it disappears from the data, an unclaimed profile is set to inactive (never deleted), and a claimed one is reported for review. A carrier whose MC number is already on another profile is skipped and reported.
+
+The dataset was last refreshed in May 2026 and FMCSA no longer updates it, so treat it as a snapshot. It only includes carriers with federal operating authority, so local-only movers need to list themselves.
+
 ---
 
 ## Running tests
 
 ```bash
-# Backend: API and pricing engine tests
+# Backend: all apps (API, pricing engine, movers import)
 cd backend
-python manage.py test api
+python manage.py test
 
 # Frontend: component and page tests
 cd frontend
 npm test
 ```
 
-The pricing engine tests run against a fixed copy of the config, so you can change the numbers in `pricing.py` without breaking them.
+The pricing engine tests run against a fixed copy of the config, so you can change the numbers in `pricing.py` without breaking them. The movers import tests use saved sample responses and never call FMCSA.
 
 ---
 
@@ -222,6 +239,12 @@ backend/
     serializers.py      # validation
     tests.py            # API tests
     test_pricing.py     # pricing engine unit tests
+  movers/
+    models.py           # Mover profiles (unclaimed / unverified / verified / inactive)
+    fmcsa.py            # reads and combines FMCSA authority records
+    importer.py         # import rules
+    management/commands/import_fmcsa_movers.py
+    tests/
   backend/settings.py   # environment-driven settings
 frontend/
   src/
