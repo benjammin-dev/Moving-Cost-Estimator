@@ -6,6 +6,7 @@ import ProtectedRoute from "./components/ProtectedRoute"
 import Estimate from "./pages/Estimate"
 import { ACCESS_TOKEN, REFRESH_TOKEN } from "./constants"
 import CompletedMoves from "./pages/CompletedMoves"
+import QuoteWidget from "./pages/QuoteWidget"
 
 // Only clear login tokens, so other saved preferences (like the theme) stay.
 function clearTokens() {
@@ -43,6 +44,8 @@ function App() {
             </ProtectedRoute>
           }
         />
+        {/* Public, no login: embeddable quote widget */}
+        <Route path="/widget" element={<QuoteWidget />} />
         <Route path="/login" element={<Login />} />
         <Route path="/logout" element={<Logout />} />
         <Route path="/register" element={<RegisterAndLogout />} />

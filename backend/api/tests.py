@@ -1,3 +1,5 @@
+from django.core.cache import cache
+from django.test import override_settings
 from django.contrib.auth.models import User
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -286,6 +288,50 @@ class EstimateApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         values = [i["value"] for i in response.data["special_items"]]
         self.assertIn("upright_piano", values)
+
+
+class PublicQuoteTests(APITestCase):
+    """The widget prices moves without an account. Only preview and the
+    pricing options are public; saving and reading estimates still need login."""
+
+    def setUp(self):
+        cache.clear()  # throttle counts live in the cache
+        self.addCleanup(cache.clear)
+
+    def test_preview_works_without_login(self):
+        response = self.client.post("/api/estimates/preview/", {"square_footage": 800}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("total", response.data)
+        self.assertFalse(Estimator.objects.exists())
+
+    def test_preview_still_validates_input(self):
+        response = self.client.post("/api/estimates/preview/", {"square_footage": 0}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_options_work_without_login(self):
+        response = self.client.get("/api/pricing/options/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("special_items", response.data)
+
+    def test_stale_token_does_not_break_public_quote(self):
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer not-a-real-token")
+        response = self.client.post("/api/estimates/preview/", {"square_footage": 800}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_saving_and_listing_estimates_still_require_login(self):
+        create = self.client.post("/api/estimates/", {"customer_name": "A", "square_footage": 800}, format="json")
+        listing = self.client.get("/api/estimates/")
+        self.assertEqual(create.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(listing.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertFalse(Estimator.objects.exists())
+
+    @override_settings(QUOTE_PREVIEW_RATE="2/minute")
+    def test_public_quote_is_rate_limited(self):
+        codes = [
+            self.client.post("/api/estimates/preview/", {"square_footage": 800}, format="json").status_code
+            for _ in range(3)
+        ]
+        self.assertEqual(codes, [200, 200, status.HTTP_429_TOO_MANY_REQUESTS])
 
 
 class CompletionApiTests(APITestCase):
