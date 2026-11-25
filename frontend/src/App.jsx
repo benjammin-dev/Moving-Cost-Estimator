@@ -9,6 +9,7 @@ import CompletedMoves from "./pages/CompletedMoves"
 import QuoteWidget from "./pages/QuoteWidget"
 import Movers from "./pages/Movers"
 import MoverDetail from "./pages/MoverDetail"
+import AddMover from "./pages/AddMover"
 
 // Only clear login tokens, so other saved preferences (like the theme) stay.
 function clearTokens() {
@@ -52,6 +53,14 @@ function App() {
           element={
             <ProtectedRoute>
               <Movers />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/movers/new"
+          element={
+            <ProtectedRoute>
+              <AddMover />
             </ProtectedRoute>
           }
         />
