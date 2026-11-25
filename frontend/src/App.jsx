@@ -7,6 +7,8 @@ import Estimate from "./pages/Estimate"
 import { ACCESS_TOKEN, REFRESH_TOKEN } from "./constants"
 import CompletedMoves from "./pages/CompletedMoves"
 import QuoteWidget from "./pages/QuoteWidget"
+import Movers from "./pages/Movers"
+import MoverDetail from "./pages/MoverDetail"
 
 // Only clear login tokens, so other saved preferences (like the theme) stay.
 function clearTokens() {
@@ -41,6 +43,23 @@ function App() {
           element={
             <ProtectedRoute>
               <CompletedMoves />
+            </ProtectedRoute>
+          }
+        />
+        {/* Staff only: the pages show a notice to other accounts */}
+        <Route
+          path="/movers"
+          element={
+            <ProtectedRoute>
+              <Movers />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/movers/:id"
+          element={
+            <ProtectedRoute>
+              <MoverDetail />
             </ProtectedRoute>
           }
         />

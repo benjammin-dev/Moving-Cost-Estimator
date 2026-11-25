@@ -76,6 +76,14 @@ class CreateUserView(generics.CreateAPIView):
     permission_classes = [AllowAny]
 
 
+class CurrentUser(APIView):
+    """GET /api/user/me/: who's signed in, and whether they're staff (the
+    frontend uses this to show the staff-only Movers pages)."""
+
+    def get(self, request):
+        return Response({"username": request.user.username, "is_staff": request.user.is_staff})
+
+
 class EstimateListCreate(generics.ListCreateAPIView):
     """GET /api/estimates/?status=open|completed (omit for all)."""
     serializer_class = EstimatorSerializer
