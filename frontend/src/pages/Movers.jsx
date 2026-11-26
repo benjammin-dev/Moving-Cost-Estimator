@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link, useLocation, useSearchParams } from "react-router-dom"
-import { ChevronLeft, ChevronRight, Search } from "lucide-react"
+import { ChevronLeft, ChevronRight, Plus, Search } from "lucide-react"
 import api from "../api"
 import ImportPanel from "../components/ImportPanel"
-import { AuthorityBadge, ClaimedBadge, StatusBadge } from "../components/MoverBadges"
+import { AuthorityBadge, ClaimedBadge, StatusBadge, UtcBadge } from "../components/MoverBadges"
 import NavBar from "../components/NavBar"
 import Notice from "../components/Notice"
 import PageHeader from "../components/PageHeader"
@@ -14,13 +14,18 @@ import { MOVER_FILTERS, STATUS_OPTIONS, displayName, importSummary, moverListQue
 import { buttonClass, cardClass, errorMessage, inputClass } from "../ui"
 
 const PAGE_SIZE = 25
+const POLL_MS = 3000
 const STATUS_FILTERS = [{ value: "", label: "All" }, ...STATUS_OPTIONS]
+const KIND_LABELS = { fmcsa: "FMCSA", utc: "UTC" }
 
-// Staff-only directory of mover profiles, with the FMCSA import controls.
+// Staff-only directory of mover profiles, with the import controls.
 function Movers() {
     const [params, setParams] = useSearchParams()
     const query = moverListQuery(params)
     const [reload, setReload] = useState(0)
+    const [summaryTick, setSummaryTick] = useState(0)
+    // Import runs this page has seen running, so it can tell when they finish.
+    const watching = useRef(new Set())
     const [summary, setSummary] = useState(null)
     const [list, setList] = useState({ key: null, data: null })
     const [error, setError] = useState("")
@@ -37,9 +42,31 @@ function Movers() {
 
     useEffect(() => {
         api.get("/api/movers/summary/")
-            .then((res) => setSummary(res.data))
+            .then((res) => {
+                const runs = Object.values(res.data.latest_imports ?? {}).filter(Boolean)
+                runs.filter((r) => !r.finished_at).forEach((r) => watching.current.add(r.id))
+                const finished = runs.filter((r) => r.finished_at && watching.current.has(r.id))
+                finished.forEach((r) => watching.current.delete(r.id))
+                if (finished.length) {
+                    setReload((n) => n + 1)
+                    const run = finished[0]
+                    const label = KIND_LABELS[run.kind] ?? "Import"
+                    if (!run.succeeded) setError(`${label} import failed: ${run.error || "unknown error"}`)
+                    else if (run.dry_run) setSuccess(`${label} preview finished, nothing saved: ${importSummary(run.stats, run.kind)}.`)
+                    else setSuccess(`${label} import finished: ${importSummary(run.stats, run.kind)}.`)
+                }
+                setSummary(res.data)
+            })
             .catch((err) => handleError(err, "Couldn't load the movers summary."))
-    }, [reload])
+    }, [summaryTick])
+
+    // While an import is running, check on it every few seconds.
+    const anyRunning = Object.values(summary?.latest_imports ?? {}).some((r) => r && !r.finished_at)
+    useEffect(() => {
+        if (!anyRunning) return
+        const timer = setTimeout(() => setSummaryTick((n) => n + 1), POLL_MS)
+        return () => clearTimeout(timer)
+    }, [anyRunning, summary])
 
     const listKey = `${query}#${reload}`
     useEffect(() => {
@@ -72,9 +99,10 @@ function Movers() {
     }
     const filtered = MOVER_FILTERS.some((key) => params.get(key))
 
-    const onImported = (run) => {
-        setReload((n) => n + 1)
-        setSuccess(run.dry_run ? `Preview finished, nothing saved: ${importSummary(run.stats)}.` : `Import finished: ${importSummary(run.stats)}.`)
+    const onStarted = (run) => {
+        watching.current.add(run.id)
+        setSuccess("")
+        setSummaryTick((n) => n + 1)
     }
 
     const counts = summary?.counts
@@ -88,7 +116,12 @@ function Movers() {
                 <PageHeader
                     eyebrow="Staff"
                     title="Movers"
-                    description="Moving companies imported from FMCSA or listed by movers. Profiles can't be booked until they're verified with a UTC permit number."
+                    description="Moving companies from FMCSA and the Washington UTC, or added by staff. Profiles can't be booked until they're verified with a UTC permit number."
+                    aside={!forbidden && (
+                        <Link to="/movers/new" className={buttonClass.primary}>
+                            <Plus size={16} /> Add mover
+                        </Link>
+                    )}
                 />
 
                 {forbidden ? (
@@ -99,16 +132,22 @@ function Movers() {
                         <Notice message={success} kind="success" onDismiss={() => setSuccess("")} />
 
                         {counts && (
-                            <section aria-label="Mover counts" className="mb-8 grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-line bg-line shadow-card lg:grid-cols-5">
+                            <section aria-label="Mover counts" className="mb-8 grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-line bg-line shadow-card sm:grid-cols-3 lg:grid-cols-6">
                                 <Stat label="Profiles" value={counts.total} note={`${counts.claimed} claimed`} />
-                                <Stat label="Unverified" value={counts.unverified} />
-                                <Stat label="Verified" value={counts.verified} />
+                                <Stat label="UTC permitted" value={counts.utc_active} note="Active on the UTC list" />
                                 <Stat label="Bookable" value={counts.bookable} note="Verified with a UTC permit" />
+                                <Stat label="Verified" value={counts.verified} />
+                                <Stat label="Unverified" value={counts.unverified} />
                                 <Stat label="Inactive" value={counts.inactive} />
                             </section>
                         )}
 
-                        {summary && <ImportPanel latest={summary.latest_import} onImported={onImported} />}
+                        {summary && (
+                            <div className="mb-8 grid gap-6 lg:grid-cols-2">
+                                <ImportPanel kind="utc" latest={summary.latest_imports?.utc} onStarted={onStarted} />
+                                <ImportPanel kind="fmcsa" latest={summary.latest_imports?.fmcsa} onStarted={onStarted} />
+                            </div>
+                        )}
 
                         <Filters key={filterBar.key} initialSearch={filterBar.search} params={params} setFilter={setFilter} />
 
@@ -152,23 +191,30 @@ function Filters({ initialSearch, params, setFilter }) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [search])
 
-    const selectClass = `${inputClass} py-1.5 text-sm`
+    const selectClass = `${inputClass} py-1.5 text-sm sm:w-auto`
     return (
-        <div className="mb-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] md:items-end">
+        <div className="mb-5 space-y-3">
             <div className="relative">
                 <Search size={15} className="pointer-events-none absolute inset-y-0 left-3 my-auto text-ink-3" aria-hidden="true" />
                 <input
                     type="search"
                     aria-label="Search movers"
-                    placeholder="Name, city, USDOT or MC number"
+                    placeholder="Name, city, USDOT, MC or UTC permit number"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     className={`${inputClass} py-1.5 pl-9 text-sm`}
                 />
             </div>
-            <div className="md:w-80">
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+            <div className="sm:w-80">
                 <Segmented name="status-filter" value={params.get("status") ?? ""} options={STATUS_FILTERS} onChange={(v) => setFilter("status", v)} />
             </div>
+            <select aria-label="UTC permit" value={params.get("utc") ?? ""} onChange={(e) => setFilter("utc", e.target.value)} className={selectClass}>
+                <option value="">Any UTC status</option>
+                <option value="active">UTC permit active</option>
+                <option value="not_permitted">Not permitted (on UTC list)</option>
+                <option value="none">Not on UTC list</option>
+            </select>
             <select aria-label="Claimed" value={params.get("claimed") ?? ""} onChange={(e) => setFilter("claimed", e.target.value)} className={selectClass}>
                 <option value="">Claimed or not</option>
                 <option value="true">Claimed</option>
@@ -179,6 +225,7 @@ function Filters({ initialSearch, params, setFilter }) {
                 <option value="active">Authority active</option>
                 <option value="lapsed">Authority lapsed</option>
             </select>
+            </div>
         </div>
     )
 }
@@ -205,7 +252,7 @@ function MoverResults({ data, loading, filtered, onClear }) {
                         <button type="button" onClick={onClear} className={`${buttonClass.secondary} mt-4`}>Clear filters</button>
                     </>
                 ) : (
-                    <p className="text-sm text-ink-2">No movers yet. Turn off “Preview only” and run an import to load carriers from FMCSA.</p>
+                    <p className="text-sm text-ink-2">No movers yet. Turn off “Preview only” and run an import above, or add a mover.</p>
                 )}
             </div>
         )
@@ -222,7 +269,7 @@ function MoverResults({ data, loading, filtered, onClear }) {
                             <th scope="col" className="px-3 py-3 font-semibold">Location</th>
                             <th scope="col" className="px-3 py-3 font-semibold">USDOT / MC</th>
                             <th scope="col" className="px-3 py-3 font-semibold">Profile</th>
-                            <th scope="col" className="px-5 py-3 font-semibold">Federal authority</th>
+                            <th scope="col" className="px-5 py-3 font-semibold">Permits</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-line">
@@ -236,13 +283,18 @@ function MoverResults({ data, loading, filtered, onClear }) {
                                 </td>
                                 <td className="px-3 py-3 text-ink-2">{[m.city, m.state].filter(Boolean).join(", ") || "-"}</td>
                                 <td className="px-3 py-3 tabular-nums text-ink-2">
-                                    {m.usdot_number}
+                                    {m.usdot_number ?? <span className="text-ink-3">No USDOT</span>}
                                     {m.mc_number && <div className="text-xs text-ink-3">MC {m.mc_number}</div>}
                                 </td>
                                 <td className="px-3 py-3">
                                     <div className="flex flex-wrap gap-1.5"><StatusBadge status={m.status} /><ClaimedBadge claimed={m.claimed} /></div>
                                 </td>
-                                <td className="px-5 py-3"><AuthorityBadge active={m.fmcsa_authority_active} /></td>
+                                <td className="px-5 py-3">
+                                    <div className="flex flex-col items-start gap-1.5">
+                                        <UtcBadge status={m.utc_status} />
+                                        {m.fmcsa_authority_active !== null && <AuthorityBadge active={m.fmcsa_authority_active} />}
+                                    </div>
+                                </td>
                             </tr>
                         ))}
                     </tbody>
@@ -256,12 +308,13 @@ function MoverResults({ data, loading, filtered, onClear }) {
                         <Link to={`/movers/${m.id}`} state={linkState} className={`${cardClass} block p-4 transition-colors hover:border-line-strong`}>
                             <div className="font-medium text-ink">{displayName(m)}</div>
                             <div className="mt-0.5 text-xs text-ink-3">
-                                {[m.city, m.state].filter(Boolean).join(", ")} · USDOT {m.usdot_number}{m.mc_number && ` · MC ${m.mc_number}`}
+                                {[[m.city, m.state].filter(Boolean).join(", "), m.usdot_number && `USDOT ${m.usdot_number}`, m.mc_number && `MC ${m.mc_number}`].filter(Boolean).join(" · ")}
                             </div>
                             <div className="mt-3 flex flex-wrap gap-1.5">
                                 <StatusBadge status={m.status} />
                                 <ClaimedBadge claimed={m.claimed} />
-                                <AuthorityBadge active={m.fmcsa_authority_active} />
+                                <UtcBadge status={m.utc_status} />
+                                {m.fmcsa_authority_active !== null && <AuthorityBadge active={m.fmcsa_authority_active} />}
                             </div>
                         </Link>
                     </li>

@@ -43,7 +43,7 @@ class Command(BaseCommand):
 
         try:
             _, stats = run_import(
-                state=state, dry_run=options["dry_run"], limit=options["limit"], file_path=path,
+                "fmcsa", state=state, dry_run=options["dry_run"], limit=options["limit"], file_path=path,
                 log=self.stderr.write, debug=debug,
             )
         except FMCSAError as err:

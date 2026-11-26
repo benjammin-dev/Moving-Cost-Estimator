@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react"
 import { Link, useLocation, useParams } from "react-router-dom"
-import { ArrowLeft, Building2, ExternalLink, Landmark, ShieldCheck } from "lucide-react"
+import { ArrowLeft, Building2, DatabaseZap, ExternalLink, Landmark, ShieldCheck } from "lucide-react"
 import api from "../api"
-import { AuthorityBadge, ClaimedBadge, StatusBadge } from "../components/MoverBadges"
+import { AuthorityBadge, ClaimedBadge, StatusBadge, UtcBadge } from "../components/MoverBadges"
 import NavBar from "../components/NavBar"
 import Notice from "../components/Notice"
 import StaffOnly from "../components/StaffOnly"
 import { Field, Segmented } from "../components/controls"
-import { STATUS_OPTIONS, displayName, saferUrl } from "../movers"
+import { SOURCE_LABELS, STATUS_OPTIONS, displayName, saferUrl, utcCompanyUrl } from "../movers"
 import { buttonClass, cardClass, errorMessage, formatDateTime, formatPhone, inputClass } from "../ui"
 
 // One mover's profile, with the staff verification controls.
@@ -17,7 +17,7 @@ function MoverDetail() {
     const backTo = `/movers${location.state?.from ?? ""}`
     const [result, setResult] = useState({ id: null, mover: null, problem: null })
     const [error, setError] = useState("")
-    const [success, setSuccess] = useState("")
+    const [success, setSuccess] = useState(() => location.state?.created ? "Mover added. Verify it once you've checked its UTC permit." : "")
 
     useEffect(() => {
         let cancelled = false
@@ -79,7 +79,8 @@ function MoverProfile({ mover, onSaved }) {
                 <div className="mt-4 flex flex-wrap gap-1.5">
                     <StatusBadge status={mover.status} />
                     <ClaimedBadge claimed={mover.claimed} />
-                    <AuthorityBadge active={mover.fmcsa_authority_active} />
+                    <UtcBadge status={mover.utc_status} />
+                    {mover.fmcsa_authority_active !== null && <AuthorityBadge active={mover.fmcsa_authority_active} />}
                 </div>
             </header>
 
@@ -92,23 +93,40 @@ function MoverProfile({ mover, onSaved }) {
                             <Item label="Address" wide>{address || "-"}</Item>
                             <Item label="Phone">{formatPhone(mover.phone)}</Item>
                             <Item label="USDOT number">
-                                <a href={saferUrl(mover.usdot_number)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent-text hover:underline underline-offset-4">
-                                    {mover.usdot_number}
-                                    <ExternalLink size={13} aria-hidden="true" />
-                                    <span className="sr-only">(opens FMCSA's SAFER company snapshot)</span>
-                                </a>
+                                {mover.usdot_number ? (
+                                    <ExternalItem href={saferUrl(mover.usdot_number)} label="opens FMCSA's SAFER company snapshot">{mover.usdot_number}</ExternalItem>
+                                ) : "None on record"}
                             </Item>
                             <Item label="MC number">{mover.mc_number ? `MC ${mover.mc_number}` : "-"}</Item>
                         </dl>
                     </Card>
 
-                    <Card icon={Landmark} title="Federal data" description="From FMCSA's “Carrier – All With History” dataset.">
+                    <Card icon={Landmark} title="Washington UTC" description="From the UTC's regulated companies list. This is what in-state moves depend on.">
+                        <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+                            <Item label="UTC status"><UtcBadge status={mover.utc_status} /></Item>
+                            <Item label="UTC permit number">{mover.utc_permit_number || "-"}</Item>
+                            <Item label="UTC company page">
+                                {mover.utc_company_id ? (
+                                    <ExternalItem href={utcCompanyUrl(mover.utc_company_id)} label="opens the company's page on utc.wa.gov">UTC {mover.utc_company_id}</ExternalItem>
+                                ) : "Not linked"}
+                            </Item>
+                            <Item label="Last synced">{formatDateTime(mover.utc_synced_at)}</Item>
+                        </dl>
+                    </Card>
+
+                    <Card icon={DatabaseZap} title="Federal data" description="From FMCSA's “Carrier – All With History” dataset (interstate authority).">
                         <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
                             <Item label="Household goods authority"><AuthorityBadge active={mover.fmcsa_authority_active} /></Item>
                             <Item label="Last synced">{formatDateTime(mover.fmcsa_synced_at)}</Item>
+                        </dl>
+                    </Card>
+
+                    <Card icon={Building2} title="Profile">
+                        <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+                            <Item label="Added from">{SOURCE_LABELS[mover.source] ?? "-"}</Item>
+                            <Item label="Google place">{mover.google_place_id ? "Linked" : "Not linked"}</Item>
                             <Item label="Profile created">{formatDateTime(mover.created_at)}</Item>
                             <Item label="Last updated">{formatDateTime(mover.updated_at)}</Item>
-                            <Item label="Google place">{mover.google_place_id ? "Linked" : "Not linked"}</Item>
                         </dl>
                     </Card>
                 </div>
@@ -195,6 +213,16 @@ function Card({ icon: Icon, title, description, children }) {
             </header>
             {children}
         </section>
+    )
+}
+
+function ExternalItem({ href, label, children }) {
+    return (
+        <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent-text hover:underline underline-offset-4">
+            {children}
+            <ExternalLink size={13} aria-hidden="true" />
+            <span className="sr-only">({label})</span>
+        </a>
     )
 }
 

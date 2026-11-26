@@ -7,6 +7,11 @@ class Mover(models.Model):
     unverified, and can't be booked, until a UTC permit number is provided
     and checked."""
 
+    class Source(models.TextChoices):
+        FMCSA = "fmcsa", "FMCSA import"
+        UTC = "utc", "UTC import"
+        STAFF = "staff", "Added by staff"
+
     class Status(models.TextChoices):
         UNVERIFIED = "unverified", "Unverified"
         VERIFIED = "verified", "Verified"
@@ -18,7 +23,8 @@ class Mover(models.Model):
     # import only fills them in while a profile is unclaimed.
     name = models.CharField(max_length=200, help_text="Legal name")
     dba_name = models.CharField("DBA name", max_length=200, blank=True)
-    usdot_number = models.PositiveIntegerField("USDOT number", unique=True)
+    # Optional: many local movers have no USDOT number.
+    usdot_number = models.PositiveIntegerField("USDOT number", unique=True, null=True, blank=True)
     mc_number = models.CharField("MC number", max_length=20, blank=True)
     street = models.CharField(max_length=200, blank=True)
     city = models.CharField(max_length=100, blank=True)
@@ -30,6 +36,7 @@ class Mover(models.Model):
         "UTC permit number", max_length=20, null=True, blank=True, unique=True
     )
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.UNVERIFIED)
+    source = models.CharField(max_length=10, choices=Source.choices, help_text="Where the profile came from")
     claimed = models.BooleanField(default=False)
     # Only the Google place ID may be stored. Ratings and other Google data
     # are fetched live, never saved.
@@ -45,6 +52,18 @@ class Mover(models.Model):
         help_text="Last time the FMCSA import found this carrier",
     )
 
+    # Washington UTC data, refreshed by every UTC import.
+    utc_company_id = models.PositiveIntegerField(
+        "UTC company ID", null=True, blank=True, unique=True,
+        help_text="The number in the company's utc.wa.gov/company/... page address",
+    )
+    utc_status = models.CharField(
+        "UTC status", max_length=20, blank=True,
+        help_text="As the UTC lists it: Active, Pending, Unregulated, Inactive. Blank if not on the UTC list.",
+    )
+    utc_synced_at = models.DateTimeField("UTC synced at", null=True, blank=True)
+    utc_detail_synced_at = models.DateTimeField("UTC company page read at", null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -52,7 +71,12 @@ class Mover(models.Model):
         ordering = ["name"]
 
     def __str__(self):
-        return f"{self.dba_name or self.name} (USDOT {self.usdot_number})"
+        number = f"USDOT {self.usdot_number}" if self.usdot_number else f"UTC {self.utc_company_id or '-'}"
+        return f"{self.dba_name or self.name} ({number})"
+
+    @property
+    def utc_permit_active(self):
+        return self.utc_status == "Active"
 
     def is_bookable(self):
         """Customers can only book a verified mover with a UTC permit number."""
@@ -60,12 +84,19 @@ class Mover(models.Model):
 
 
 class ImportRun(models.Model):
-    """One run of the FMCSA import, from the command line or the Movers page,
-    so the app can show what happened last."""
+    """One run of an import (FMCSA or UTC), from the command line or the
+    Movers page, so the app can show what happened last. A run with no
+    finished_at is still going."""
+
+    class Kind(models.TextChoices):
+        FMCSA = "fmcsa", "FMCSA"
+        UTC = "utc", "Washington UTC"
+
+    kind = models.CharField(max_length=10, choices=Kind.choices, default=Kind.FMCSA)
     started_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     state = models.CharField(max_length=2)
-    source = models.CharField(max_length=255, help_text="FMCSA download, or the CSV file read")
+    source = models.CharField(max_length=255, help_text="What was read: the FMCSA dataset, a CSV file, or the UTC lookup")
     dry_run = models.BooleanField(default=False)
     # Empty when run from the command line.
     triggered_by = models.ForeignKey(
@@ -81,5 +112,5 @@ class ImportRun(models.Model):
         ordering = ["-started_at", "-id"]
 
     def __str__(self):
-        kind = "Dry run" if self.dry_run else "Import"
-        return f"{kind} {self.state} at {self.started_at:%Y-%m-%d %H:%M}"
+        what = "Dry run" if self.dry_run else "Import"
+        return f"{self.get_kind_display()} {what.lower()} {self.state} at {self.started_at:%Y-%m-%d %H:%M}"

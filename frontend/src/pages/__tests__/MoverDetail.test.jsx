@@ -13,7 +13,14 @@ const MOVER = {
   street: '1 MAIN ST', city: 'SEATTLE', state: 'WA', zip_code: '98133-8883', phone: '2065550100',
   utc_permit_number: null, status: 'unverified', claimed: false, google_place_id: null,
   fmcsa_authority_active: true, fmcsa_synced_at: '2026-11-25T18:00:00Z', is_bookable: false,
+  source: 'fmcsa', utc_company_id: null, utc_status: '', utc_synced_at: null,
   created_at: '2026-11-25T18:00:00Z', updated_at: '2026-11-25T18:00:00Z',
+}
+
+const UTC_MOVER = {
+  ...MOVER, id: 8, name: 'A Aaron Glide Self Mover Service', dba_name: '', usdot_number: null, mc_number: '',
+  source: 'utc', utc_company_id: 44654, utc_status: 'Unregulated', utc_synced_at: '2026-11-25T19:00:00Z',
+  fmcsa_authority_active: null, fmcsa_synced_at: null, status: 'inactive',
 }
 
 function renderPage(mover = MOVER, state) {
@@ -45,6 +52,21 @@ describe('MoverDetail page', () => {
     expect(safer).toHaveAttribute('href', expect.stringContaining('query_string=8257'))
     expect(safer).toHaveAttribute('rel', 'noopener noreferrer')
     expect(screen.getByText(/Not bookable yet/)).toBeInTheDocument()
+  })
+
+  it('shows UTC details and handles a mover with no USDOT number', async () => {
+    renderPage(UTC_MOVER)
+    expect(await screen.findByRole('heading', { name: 'A Aaron Glide Self Mover Service', level: 1 })).toBeInTheDocument()
+    expect(screen.getByText('None on record')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /SAFER/ })).not.toBeInTheDocument()
+    expect(screen.getAllByText('UTC: Unregulated').length).toBeGreaterThan(0)
+    expect(screen.getByRole('link', { name: /UTC 44654/ })).toHaveAttribute('href', 'https://www.utc.wa.gov/company/44654')
+    expect(screen.getByText('Washington UTC import')).toBeInTheDocument()
+  })
+
+  it('confirms a mover that was just added', async () => {
+    renderPage(MOVER, { created: true })
+    expect(await screen.findByText("Mover added. Verify it once you've checked its UTC permit.")).toBeInTheDocument()
   })
 
   it('links back to the list with the filters it came from', async () => {

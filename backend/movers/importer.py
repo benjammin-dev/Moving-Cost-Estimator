@@ -16,6 +16,9 @@ Rules:
 - A carrier whose MC number is already on another USDOT's profile is
   skipped and logged rather than merged.
 - Movers the import never found (e.g. self-listed) are never touched.
+- The Washington UTC has the final say for in-state moves: a mover the UTC
+  lists as Active is never deactivated here, and one the UTC lists as not
+  permitted (e.g. Unregulated) is never reactivated here.
 """
 
 from dataclasses import dataclass
@@ -95,7 +98,7 @@ def import_movers(rows, *, state="WA", dry_run=False, limit=None, now=None,
             debug(f"USDOT {dot}: creating.")
             if not dry_run:
                 Mover.objects.create(
-                    usdot_number=dot, **profile_fields(carrier),
+                    usdot_number=dot, **profile_fields(carrier), source=Mover.Source.FMCSA,
                     fmcsa_authority_active=True, fmcsa_synced_at=now,
                 )
 
@@ -106,6 +109,7 @@ def import_movers(rows, *, state="WA", dry_run=False, limit=None, now=None,
             Mover.objects.filter(state=state.upper(), claimed=False, fmcsa_synced_at__isnull=False)
             .exclude(status=Mover.Status.INACTIVE)
             .exclude(usdot_number__in=found)
+            .exclude(utc_status="Active")
         )
         for mover in gone:
             stats.deactivated += 1
@@ -124,13 +128,20 @@ def _update(mover, carrier, now):
     if not mover.claimed:
         for field, value in profile_fields(carrier).items():
             setattr(mover, field, value)
-        if mover.status == Mover.Status.INACTIVE:
+        if mover.status == Mover.Status.INACTIVE and not utc_blocks(mover):
             mover.status = Mover.Status.UNVERIFIED  # active again; needs re-verifying
     mover.save()
 
 
+def utc_blocks(mover):
+    """The UTC knows this mover and doesn't list it as permitted."""
+    return bool(mover.utc_status) and mover.utc_status not in ("Active", "Pending")
+
+
 def _record_inactive_authority(mover, stats, dry_run, now, log):
-    deactivate = not mover.claimed and mover.status != Mover.Status.INACTIVE
+    deactivate = not mover.claimed and mover.status != Mover.Status.INACTIVE and not mover.utc_permit_active
+    if mover.utc_permit_active and not mover.claimed:
+        log(f"USDOT {mover.usdot_number}: federal authority is no longer active, but the UTC lists an active permit. Kept.")
     if deactivate:
         stats.deactivated += 1
         log(f"USDOT {mover.usdot_number}: federal authority is no longer active. Set to inactive.")

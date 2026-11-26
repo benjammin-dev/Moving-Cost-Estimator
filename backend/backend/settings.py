@@ -51,6 +51,12 @@ REST_FRAMEWORK = {
 # use a shared cache (e.g. Redis) to make it exact across gunicorn workers.
 QUOTE_PREVIEW_RATE = os.environ.get('DJANGO_QUOTE_PREVIEW_RATE', '120/minute')
 
+# Mover imports started from the Movers page run in a background thread
+# (the first UTC import takes ~12 minutes). Tests turn this off.
+MOVER_IMPORTS_IN_BACKGROUND = os.environ.get('DJANGO_MOVER_IMPORTS_IN_BACKGROUND', 'True') == 'True'
+# Pause between requests to utc.wa.gov, to be polite to the site.
+UTC_IMPORT_SLEEP_SECONDS = float(os.environ.get('DJANGO_UTC_IMPORT_SLEEP_SECONDS', '1.0'))
+
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
@@ -165,6 +171,11 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# The test runner can't wait on background threads, so imports run inline.
+import sys  # noqa: E402
+if 'test' in sys.argv[1:2]:
+    MOVER_IMPORTS_IN_BACKGROUND = False
 
 # Which frontends may call the API. Comma-separated, e.g.
 # DJANGO_CORS_ALLOWED_ORIGINS=https://movers.example.com

@@ -162,11 +162,12 @@ Before deploying anywhere public, edit `.env` to set a real `DJANGO_SECRET_KEY` 
 ### Movers directory (staff only)
 
 Staff accounts get a **Movers** link in the top bar. It opens a directory of mover profiles with:
-- counts (unverified, verified, bookable, inactive and claimed)
-- search by name, city, USDOT or MC number, with filters
-- each mover's company and federal details, and a link to FMCSA's public SAFER snapshot
+- counts (UTC permitted, bookable, verified, unverified, inactive and claimed)
+- search by name, city, USDOT, MC or UTC permit number, with filters (including UTC permit status)
+- each mover's company, Washington UTC and federal details, with links to its UTC company page and FMCSA's SAFER snapshot
 - a verification panel to record the UTC permit number and set the status
-- the latest FMCSA import, with a button to preview or run a new one
+- the Washington UTC and FMCSA imports, each with a button to preview or run one. Imports run in the background, and the page shows progress.
+- **Add mover**, for companies that aren't in either dataset. A USDOT number is optional.
 
 Other accounts see a "Staff only" message, and the API refuses them.
 
@@ -176,11 +177,34 @@ To give an account staff access, run this from `backend/` (replace `USERNAME`):
 python manage.py shell -c "from django.contrib.auth.models import User; User.objects.filter(username='USERNAME').update(is_staff=True)"
 ```
 
+### Importing movers from the Washington UTC
+
+`import_utc_movers` reads the UTC's public [regulated companies lookup](https://www.utc.wa.gov/companies), filtered to household goods carriers. This is the best source for local, in-state movers: it includes companies with no federal authority or USDOT number, and companies registered out of state that hold a Washington permit. For each company it reads the detail page for the address, business phone and household goods permit number. Contact names and emails aren't stored.
+
+| UTC status | Imported as |
+|---|---|
+| Active (with an active household goods permit, permanent like `HG060620` or temporary like `THG071354`) | **Verified**, with the permit number, so bookable |
+| Active company without an active household goods permit (e.g. only a freight permit) | Shown as "Canceled" or "No HHG permit"; never verified |
+| Pending | Unverified |
+| Unregulated | Inactive |
+| Inactive (mostly old, cancelled permits) | Skipped, unless `--include-inactive` |
+
+Run it from the **Movers** page, or from `backend/`:
+
+```bash
+python manage.py import_utc_movers --dry-run   # quick: reads the list only, saves nothing
+python manage.py import_utc_movers             # first run reads ~700 company pages, about 15 minutes
+```
+
+Options: `--limit N`, `--include-inactive`, `--sleep SECONDS` (pause between requests, default `1`), `--dry-run` and `-v 2`.
+
+It's polite to the site: one request a second, and on later runs only new companies' pages are read (about 30 list pages, under a minute). Companies are matched to existing profiles by UTC company ID, then USDOT number. When the UTC lists one business twice under a USDOT number (often an old sole-proprietor record and the current company), the listing with the best status owns it and the other is skipped. Claimed profiles only get their UTC fields refreshed, and anything that doesn't match is reported for review. For FMCSA and staff-added profiles, the UTC fills in blank details but doesn't overwrite them. A profile like that without an active UTC permit can't be verified, but it isn't hidden either, since it may still do interstate moves. The UTC list has no API, so if the UTC redesigns the page the import will report errors rather than guess.
+
 ### Importing movers from FMCSA
 
 `import_fmcsa_movers` builds mover profiles from FMCSA's free public [Carrier – All With History](https://catalog.data.gov/dataset/carrier-all-with-history) data. No API key is needed. It imports carriers based in the state that have household goods authority, and only motor carriers (MC numbers) with **active** common or contract authority count. Freight forwarders are skipped, and a carrier listed under several dockets becomes one profile. New profiles start **unclaimed** and **unverified**, and can't be booked until a UTC permit number is verified.
 
-Run it from the **Movers** page (Preview import / Run import), or from `backend/`:
+Run it from the **Movers** page, or from `backend/`:
 
 ```bash
 python manage.py import_fmcsa_movers --dry-run   # see what would change; saves nothing
@@ -191,7 +215,7 @@ Options: `--state XX` (default `WA`), `--file PATH` (read a CSV export of the da
 
 It's safe to re-run. Existing profiles are updated, never duplicated, and claimed profiles keep the mover's own details. If a carrier's authority lapses or it disappears from the data, an unclaimed profile is set to inactive (never deleted), and a claimed one is reported for review. A carrier whose MC number is already on another profile is skipped and reported.
 
-The dataset was last refreshed in May 2026 and FMCSA no longer updates it, so treat it as a snapshot. It only includes carriers with federal operating authority, so local-only movers need to list themselves.
+The dataset was last refreshed in May 2026 and FMCSA no longer updates it, so treat it as a snapshot. It only includes carriers with federal operating authority; the UTC import covers local movers. The FMCSA import never deactivates a mover the UTC lists with an active permit.
 
 ---
 
@@ -229,10 +253,10 @@ All endpoints except register, token, and the two public quote endpoints (previe
 | `DELETE` | `/api/notes/delete/<id>/` | Delete a note |
 | `GET` | `/api/pricing/options/` | Form choices (parking, packing, special items). **Public** |
 | `GET` | `/api/user/me/` | The signed-in user's username and staff status |
-| `GET` | `/api/movers/?search=&status=&claimed=&authority=&page=` | List mover profiles, 25 per page. **Staff only** |
-| `GET` | `/api/movers/summary/` | Mover counts and the latest import. **Staff only** |
+| `GET` / `POST` | `/api/movers/?search=&status=&claimed=&authority=&utc=&source=&page=` | List mover profiles, 25 per page / add one. **Staff only** |
+| `GET` | `/api/movers/summary/` | Mover counts and the latest import of each kind. **Staff only** |
 | `GET` / `PATCH` | `/api/movers/<id>/` | A mover's profile; PATCH sets `utc_permit_number` and `status` only. **Staff only** |
-| `GET` / `POST` | `/api/movers/imports/` | Recent imports / run one (`{"dry_run": true}` to preview). **Staff only** |
+| `GET` / `POST` | `/api/movers/imports/` | Recent imports / start one in the background (`{"kind": "utc" or "fmcsa", "dry_run": true}`). **Staff only** |
 
 ### Public quote widget
 
@@ -264,15 +288,17 @@ backend/
   movers/
     models.py           # Mover profiles (unclaimed / unverified / verified / inactive)
     fmcsa.py            # reads and combines FMCSA authority records
-    importer.py         # import rules
-    services.py         # runs an import and records it (ImportRun)
+    importer.py         # FMCSA import rules
+    utc.py              # reads the Washington UTC regulated companies lookup
+    utc_importer.py     # UTC import rules
+    services.py         # runs imports (in the background from the page) and records them (ImportRun)
     views.py            # staff-only movers API
-    management/commands/import_fmcsa_movers.py
-    tests/
+    management/commands/import_fmcsa_movers.py, import_utc_movers.py
+    tests/              # tests, with trimmed copies of real UTC pages in fixtures/
   backend/settings.py   # environment-driven settings
 frontend/
   src/
-    pages/              # Estimate, CompletedMoves, Movers, MoverDetail, QuoteWidget, Login, Register
+    pages/              # Estimate, CompletedMoves, Movers, MoverDetail, AddMover, QuoteWidget, Login, Register
     components/         # EstimateForm, EstimateCard, Breakdown, controls...
     index.css           # design tokens (light and dark palettes)
     ui.js               # shared styles and formatters

@@ -24,3 +24,11 @@ export function AuthorityBadge({ active }) {
         ? <span className={`${badgeClass} bg-success-soft text-success`}>Authority active</span>
         : <span className={`${badgeClass} bg-danger-soft text-danger`}>Authority lapsed</span>
 }
+
+// The mover's standing on the Washington UTC list (in-state moves).
+export function UtcBadge({ status }) {
+    if (!status) return <span className={`${badgeClass} bg-subtle text-ink-3`}>Not on UTC list</span>
+    if (status === "Active") return <span className={`${badgeClass} bg-success-soft text-success`}>UTC permit active</span>
+    if (status === "Pending") return <span className={`${badgeClass} bg-warn-soft text-warn`}>UTC permit pending</span>
+    return <span className={`${badgeClass} bg-danger-soft text-danger`}>UTC: {status}</span>
+}

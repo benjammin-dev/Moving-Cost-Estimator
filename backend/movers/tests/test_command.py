@@ -74,3 +74,35 @@ class ImportCommandTests(TestCase):
         ]:
             with self.subTest(args=args), self.assertRaisesMessage(CommandError, message):
                 call_command("import_fmcsa_movers", *args, stdout=StringIO(), stderr=StringIO())
+
+
+class UtcImportCommandTests(TestCase):
+    def test_imports_and_prints_a_summary(self):
+        from movers.utc import CompanyDetail, ListedCompany
+
+        companies = [ListedCompany(company_id=1, name="Gentle Giant", dba_name="", usdot_number=373544, status="Active")]
+        with patch("movers.services.utc.iter_listed_companies", return_value=iter(companies)), \
+                patch("movers.services.utc.get_detail", return_value=CompanyDetail(company_id=1, permit_number="HG060620", usdot_number=373544)):
+            out = StringIO()
+            call_command("import_utc_movers", "--sleep", "0", stdout=out, stderr=StringIO())
+        mover = Mover.objects.get()
+        self.assertEqual((mover.status, mover.utc_permit_number), ("verified", "HG060620"))
+        self.assertIn("1 new, 0 updated, 1 verified with a UTC permit", out.getvalue())
+        from movers.models import ImportRun
+        self.assertEqual(ImportRun.objects.get().kind, "utc")
+
+    def test_list_download_failure_is_a_clear_error(self):
+        from movers.utc import UTCError
+
+        def failing(**kwargs):
+            raise UTCError("UTC list download failed: HTTP 503")
+            yield  # pragma: no cover
+
+        with patch("movers.services.utc.iter_listed_companies", side_effect=failing):
+            with self.assertRaisesMessage(CommandError, "UTC list download failed: HTTP 503"):
+                call_command("import_utc_movers", stdout=StringIO(), stderr=StringIO())
+
+    def test_rejects_bad_options(self):
+        for args, message in [(["--limit", "0"], "--limit must be at least 1"), (["--sleep", "-1"], "--sleep can't be negative")]:
+            with self.subTest(args=args), self.assertRaisesMessage(CommandError, message):
+                call_command("import_utc_movers", *args, stdout=StringIO(), stderr=StringIO())
