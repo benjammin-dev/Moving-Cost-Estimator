@@ -47,6 +47,7 @@ class Command(BaseCommand):
             f"{prefix}{stats.listed} listings, {stats.companies} companies: {stats.created} new, "
             f"{stats.updated} updated, {stats.verified} verified with a UTC permit, "
             f"{stats.deactivated} set inactive, {stats.inactive_skipped} inactive skipped, "
+            f"{stats.duplicates_skipped} duplicate listings skipped, "
             f"{stats.details_read} company pages read, {stats.conflicts} conflicts, {stats.errors} errors."
         ))
         if stats.errors:

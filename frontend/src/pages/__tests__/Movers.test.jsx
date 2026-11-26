@@ -26,7 +26,7 @@ const RUN = {
 const UTC_RUN = {
   id: 5, kind: 'utc', started_at: '2026-11-25T19:00:00Z', finished_at: '2026-11-25T19:12:00Z', state: 'WA',
   source: 'UTC', dry_run: false, triggered_by: 'benja', succeeded: true, error: '',
-  stats: { listed: 1522, companies: 741, created: 597, updated: 144, verified: 270, deactivated: 0, inactive_skipped: 770, details_read: 700, conflicts: 0, errors: 0 },
+  stats: { listed: 1522, companies: 741, created: 597, updated: 144, verified: 270, deactivated: 0, inactive_skipped: 770, duplicates_skipped: 12, details_read: 700, conflicts: 0, errors: 0 },
   messages: ['UTC 1 (X): something to review'],
 }
 
@@ -84,7 +84,7 @@ describe('Movers page', () => {
 
     expect(screen.getByTestId('fmcsa-latest')).toHaveTextContent('196 new · 0 updated · 755 without active authority · 48 freight forwarders skipped')
     expect(screen.getByTestId('fmcsa-latest')).toHaveTextContent('by benja')
-    expect(screen.getByTestId('utc-latest')).toHaveTextContent('597 new · 144 updated · 270 verified with a UTC permit')
+    expect(screen.getByTestId('utc-latest')).toHaveTextContent('597 new · 144 updated · 270 verified with a UTC permit · 12 duplicate listings skipped')
     expect(screen.getByText('1 message to review')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /Add mover/ })).toHaveAttribute('href', '/movers/new')
   })

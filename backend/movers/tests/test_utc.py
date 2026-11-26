@@ -77,13 +77,33 @@ class DetailPageTests(SimpleTestCase):
         self.assertEqual(detail.permit_number, "HG068131")  # not the CC freight permit
         self.assertEqual(detail.usdot_number, 3074631)
 
+    def test_uses_the_active_permit_when_an_old_one_was_canceled(self):
+        detail = parse_detail_page(page("utc_detail_canceled_then_active.html"))
+        self.assertEqual((detail.status, detail.permit_number, detail.usdot_number), ("Active", "HG000917", 1052359))
+
+    def test_active_company_whose_household_goods_permit_was_canceled(self):
+        detail = parse_detail_page(page("utc_detail_hhg_canceled.html"))
+        self.assertEqual(detail.status, "Active")  # the company (it has a freight permit)
+        self.assertEqual((detail.permit_status, detail.permit_number), ("Canceled", ""))  # household goods
+
+    def test_active_company_with_no_household_goods_permit_and_a_non_number_usdot(self):
+        detail = parse_detail_page(page("utc_detail_no_hhg_permit.html"))
+        self.assertEqual((detail.status, detail.permit_status, detail.permit_number), ("Active", "", ""))
+        self.assertIsNone(detail.usdot_number)  # the page says "Under 16,001"
+
+    def test_reads_temporary_permits(self):
+        detail = parse_detail_page(page("utc_detail_temporary_permit.html"))
+        self.assertEqual((detail.permit_number, detail.permit_type), ("THG071354", "Temporary"))
+
     def test_unregulated_company_has_no_permit_but_keeps_contact_details(self):
         detail = parse_detail_page(page("utc_detail_unregulated.html"))
         self.assertEqual((detail.status, detail.permit_number, detail.usdot_number), ("Unregulated", "", None))
         self.assertEqual((detail.city, detail.zip_code, detail.phone), ("Seattle", "98122-3936", "(425) 745-9047"))
 
     def test_never_keeps_contact_names_or_emails(self):
-        for name in ("utc_detail_active.html", "utc_detail_two_permits.html", "utc_detail_unregulated.html"):
+        for name in ("utc_detail_active.html", "utc_detail_two_permits.html", "utc_detail_unregulated.html",
+                     "utc_detail_canceled_then_active.html", "utc_detail_temporary_permit.html",
+                     "utc_detail_hhg_canceled.html", "utc_detail_no_hhg_permit.html"):
             values = vars(parse_detail_page(page(name))).values()
             self.assertFalse(any("@" in str(v) for v in values), name)
 
@@ -98,6 +118,15 @@ class DetailPageTests(SimpleTestCase):
 
         with self.assertRaisesMessage(UTCError, "UTC company 41219 page failed: HTTP 500"):
             get_detail(41219, fetch_html=fetch_html)
+
+
+class UsdotTests(SimpleTestCase):
+    def test_only_plain_numbers_count(self):
+        from movers.utc import _usdot
+        self.assertEqual(_usdot(" 373544 "), 373544)
+        self.assertEqual(_usdot("0008264"), 8264)
+        for not_a_number in ("Under 16,001", "", "N/A", "0", "12345678901"):
+            self.assertIsNone(_usdot(not_a_number), not_a_number)
 
 
 class AddressTests(SimpleTestCase):

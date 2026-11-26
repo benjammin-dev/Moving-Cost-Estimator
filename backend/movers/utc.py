@@ -23,6 +23,7 @@ COMPANIES_URL = f"{UTC_BASE_URL}/companies"
 HOUSEHOLD_GOODS_FILTER = "568"  # "Household Goods Carriers" in the lookup's industry filter
 HOUSEHOLD_GOODS_CODE = "207"  # the industry code on detail pages
 MAX_LIST_PAGES = 200
+PERMIT_PATTERN = re.compile(r"[A-Z]{2,3}\d{3,8}")
 
 # Same class as http.FetchError; the UTC name is kept for readability.
 UTCError = FetchError
@@ -123,8 +124,12 @@ def _status(text):
 
 
 def _usdot(text):
-    digits = re.sub(r"\D", "", text or "")
-    return int(digits) if digits and int(digits) > 0 else None
+    """A USDOT number only if the cell is just a number. The UTC also writes
+    things like "Under 16,001" there, which isn't one."""
+    text = (text or "").strip()
+    if not re.fullmatch(r"\d{1,10}", text):
+        return None
+    return int(text) or None
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +204,7 @@ class CompanyDetail:
     state: str = ""
     zip_code: str = ""
     usdot_number: int | None = None  # from the household goods permit row
+    permit_status: str = ""  # the household goods permit's status ("Active", "Canceled"...); "" if there's none
     permit_number: str = ""  # e.g. "HG060620"; only an active household goods permit
     permit_type: str = ""  # "Permanent" or "Temporary"
 
@@ -238,15 +244,19 @@ def parse_detail_page(html):
     address = addresses.get("physical address") or addresses.get("mailing address") or ""
     detail.street, detail.city, detail.state, detail.zip_code = split_address(address)
 
-    for permit in _records(tables.get("permits / industry", Table(""))):
-        if permit.get("code", ("", []))[0] != HOUSEHOLD_GOODS_CODE:
-            continue
-        detail.usdot_number = _usdot(permit.get("usdot", ("", []))[0])
-        number = permit.get("active permit(s)", ("", []))[0].split(" ")[0].upper()
-        if _status(permit.get("status", ("", []))[0]) == "Active" and re.fullmatch(r"[A-Z]{2}\d{3,8}", number):
+    # A company can have several household goods rows (e.g. an old Canceled
+    # permit and the current Active one). Use the active one, else the last.
+    permits = [p for p in _records(tables.get("permits / industry", Table(""))) if p.get("code", ("", []))[0] == HOUSEHOLD_GOODS_CODE]
+    active = [p for p in permits if _status(p.get("status", ("", []))[0]) == "Active"]
+    chosen = (active or permits[-1:] or [None])[0]
+    if chosen:
+        detail.usdot_number = _usdot(chosen.get("usdot", ("", []))[0])
+        detail.permit_status = _status(chosen.get("status", ("", []))[0])
+        number = chosen.get("active permit(s)", ("", []))[0].split(" ")[0].upper()
+        # Permanent permits look like HG060620; temporary ones like THG071354.
+        if chosen in active and PERMIT_PATTERN.fullmatch(number):
             detail.permit_number = number
-            detail.permit_type = permit.get("perm or temp", ("", []))[0]
-        break
+            detail.permit_type = chosen.get("perm or temp", ("", []))[0]
     return detail
 
 

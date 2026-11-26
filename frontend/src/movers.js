@@ -49,6 +49,7 @@ export function importSummary(stats = {}, kind = "fmcsa") {
             `${stats.verified ?? 0} verified with a UTC permit`,
         ]
         if (stats.deactivated) parts.push(`${stats.deactivated} set inactive`)
+        if (stats.duplicates_skipped) parts.push(`${stats.duplicates_skipped} duplicate listings skipped`)
         if (stats.conflicts) parts.push(`${stats.conflicts} conflicts`)
         if (stats.errors) parts.push(`${stats.errors} pages couldn't be read`)
         return parts.join(" · ")

@@ -9,6 +9,11 @@ Rules:
   goods permit, but only when that's still needed: new companies, companies
   never read before, and active ones with no permit number yet. That keeps
   re-runs to the ~30 list pages.
+- A company the UTC lists as Active may only hold another kind of permit
+  (e.g. freight), with its household goods permit canceled. So once its
+  page is read, its UTC status becomes that of the household goods permit
+  (e.g. "Canceled"), or "No HHG permit" if it has none. Such companies get
+  their page re-read each run, in case the permit comes back.
 - Profiles the UTC import creates: Active with an active household goods
   permit (e.g. HG060620) -> verified with that permit number, so bookable;
   Pending -> unverified; Unregulated / Inactive -> inactive.
@@ -27,6 +32,12 @@ Rules:
 - A dry run doesn't read detail pages, so it assumes every Active company
   has a permit when counting how many would be verified.
 - A failed detail page leaves that company unchanged for this run.
+- The UTC sometimes lists the same business twice under one USDOT number
+  (e.g. an old sole-proprietor record and the current LLC). The listing with
+  the best status (Active, then Pending, Unregulated, Inactive; the newest
+  record on a tie) owns the USDOT number, and the others are skipped as
+  duplicates. If a profile was linked to the weaker listing, it moves to the
+  better one.
 """
 
 import time
@@ -41,6 +52,19 @@ IMPORTED_STATUSES = {"Active", "Pending", "Unregulated"}
 VERIFIED_STATUS = "Active"
 UNVERIFIED_STATUSES = {"Pending"}
 IDENTITY_FIELDS = ("name", "dba_name", "street", "city", "state", "zip_code", "phone")
+STATUS_RANK = {"Active": 0, "Pending": 1, "Unregulated": 2, "Inactive": 3}
+NO_HHG_PERMIT = "No HHG permit"
+
+
+def household_goods_status(company, detail):
+    """The UTC status that matters for moving: the company's listed status,
+    unless its page shows an Active company without an active household
+    goods permit."""
+    if company.status != VERIFIED_STATUS or detail is None or detail.permit_number:
+        return company.status
+    if detail.permit_status and detail.permit_status != VERIFIED_STATUS:
+        return detail.permit_status[:20]
+    return VERIFIED_STATUS if detail.permit_status == VERIFIED_STATUS else NO_HHG_PERMIT
 
 
 @dataclass
@@ -53,6 +77,7 @@ class UTCStats:
     deactivated: int = 0
     inactive_skipped: int = 0  # UTC Inactive companies not imported
     details_read: int = 0
+    duplicates_skipped: int = 0  # older UTC listings of a business that has a better one
     conflicts: int = 0
     errors: int = 0
 
@@ -65,6 +90,21 @@ def _group(listed):
         if company.usdot_number:
             entry[1].add(company.usdot_number)
     return companies
+
+
+def _rank(company_id, companies):
+    """Sort key: best status first, then the newest UTC record."""
+    return (STATUS_RANK.get(companies[company_id][0].status, len(STATUS_RANK)), -company_id)
+
+
+def _usdot_owners(companies):
+    """Which company owns each USDOT number listed by more than one."""
+    owners = {}
+    for company_id, (_, usdots) in companies.items():
+        for usdot in usdots:
+            if usdot not in owners or _rank(company_id, companies) < _rank(owners[usdot], companies):
+                owners[usdot] = company_id
+    return owners
 
 
 def _clean(value, max_length):
@@ -81,14 +121,21 @@ def import_utc_movers(listed, get_detail, *, include_inactive=False, dry_run=Fal
     listed = list(listed)
     stats.listed = len(listed)
     companies = _group(listed)
+    owners = _usdot_owners(companies)
     wanted = IMPORTED_STATUSES | ({"Inactive"} if include_inactive else set())
     on_list = set(companies)
     processed = 0
     first_request = True
 
-    for company_id in sorted(companies, key=lambda cid: (companies[cid][0].name.lower(), cid)):
-        company, usdots = companies[company_id]
-        mover, clash = _match(company_id, usdots)
+    # Best listings first, so they claim shared USDOT numbers.
+    for company_id in sorted(companies, key=lambda cid: (_rank(cid, companies)[0], companies[cid][0].name.lower(), cid)):
+        company, listed_usdots = companies[company_id]
+        usdots = {u for u in listed_usdots if owners[u] == company_id}
+        if listed_usdots and not usdots and not Mover.objects.filter(utc_company_id=company_id).exists():
+            stats.duplicates_skipped += 1
+            debug(f"UTC {company_id} ({company.name}): an older listing of a business the UTC lists again under UTC {owners[min(listed_usdots)]}. Skipped.")
+            continue
+        mover, clash = _match(company_id, usdots, companies)
         if clash:
             stats.conflicts += 1
             log(f"UTC {company_id} ({company.name}): {clash} Skipped for review.")
@@ -124,9 +171,10 @@ def import_utc_movers(listed, get_detail, *, include_inactive=False, dry_run=Fal
             log(f"UTC {company_id} ({company.name}): permit {permit} is already on another profile. Permit not set.")
             permit = ""
 
+        utc_status = household_goods_status(company, detail)
         if mover is None:
             stats.created += 1
-            status = _status_for(company.status, permit or (dry_run and company.status == VERIFIED_STATUS))
+            status = _status_for(utc_status, permit or (dry_run and utc_status == VERIFIED_STATUS))
             if status == Mover.Status.VERIFIED:
                 stats.verified += 1
             debug(f"UTC {company_id} ({company.name}): creating as {status}.")
@@ -137,7 +185,7 @@ def import_utc_movers(listed, get_detail, *, include_inactive=False, dry_run=Fal
                     status=status,
                     utc_permit_number=permit or None,
                     utc_company_id=company_id,
-                    utc_status=company.status,
+                    utc_status=utc_status,
                     utc_synced_at=now,
                     utc_detail_synced_at=now if detail else None,
                     **_identity(company, detail),
@@ -145,7 +193,7 @@ def import_utc_movers(listed, get_detail, *, include_inactive=False, dry_run=Fal
             continue
 
         stats.updated += 1
-        changes = _update(mover, company, detail, usdot, permit, now, log, assume_permit=dry_run)
+        changes = _update(mover, company, utc_status, detail, usdot, permit, now, log, assume_permit=dry_run)
         if changes.get("verified"):
             stats.verified += 1
         if changes.get("deactivated"):
@@ -174,7 +222,7 @@ def import_utc_movers(listed, get_detail, *, include_inactive=False, dry_run=Fal
     return stats
 
 
-def _match(company_id, usdots):
+def _match(company_id, usdots, companies):
     """(mover or None, clash message or None)."""
     mover = Mover.objects.filter(utc_company_id=company_id).first()
     if mover:
@@ -184,7 +232,11 @@ def _match(company_id, usdots):
         numbers = ", ".join(str(m.usdot_number) for m in by_usdot)
         return None, f"its USDOT numbers match more than one profile ({numbers})."
     if by_usdot and by_usdot[0].utc_company_id:
-        return None, f"USDOT {by_usdot[0].usdot_number} is already linked to UTC {by_usdot[0].utc_company_id}."
+        linked = by_usdot[0].utc_company_id
+        if linked in companies and _rank(company_id, companies) < _rank(linked, companies):
+            by_usdot[0].utc_company_id = company_id  # move to the better listing
+            return by_usdot[0], None
+        return None, f"USDOT {by_usdot[0].usdot_number} is already linked to UTC {linked}."
     return (by_usdot[0] if by_usdot else None), None
 
 
@@ -219,11 +271,13 @@ def _identity(company, detail):
     return fields
 
 
-def _update(mover, company, detail, usdot, permit, now, log, assume_permit=False):
+def _update(mover, company, utc_status, detail, usdot, permit, now, log, assume_permit=False):
     """Apply the UTC listing to an existing profile (in memory; caller saves)."""
     changes = {}
-    mover.utc_company_id = mover.utc_company_id or company.company_id
-    mover.utc_status = company.status
+    mover.utc_company_id = company.company_id
+    if detail is not None or company.status != VERIFIED_STATUS or mover.utc_permit_number or assume_permit:
+        mover.utc_status = utc_status
+    # else: Active on the list, page not re-read, no permit: keep what the page said last time.
     mover.utc_synced_at = now
     if detail:
         mover.utc_detail_synced_at = now
@@ -231,8 +285,8 @@ def _update(mover, company, detail, usdot, permit, now, log, assume_permit=False
         mover.usdot_number = usdot
 
     if mover.claimed:
-        if company.status != VERIFIED_STATUS and mover.status == Mover.Status.VERIFIED:
-            log(f"UTC {company.company_id} ({mover.name}): the UTC lists it as {company.status}, but the profile is claimed and verified. Left as is for review.")
+        if mover.utc_status != VERIFIED_STATUS and mover.status == Mover.Status.VERIFIED:
+            log(f"UTC {company.company_id} ({mover.name}): the UTC lists it as {mover.utc_status}, but the profile is claimed and verified. Left as is for review.")
         if permit and mover.utc_permit_number and permit != mover.utc_permit_number:
             log(f"UTC {company.company_id} ({mover.name}): the UTC permit is {permit}, the profile says {mover.utc_permit_number}. Left as is for review.")
         return changes
@@ -245,12 +299,12 @@ def _update(mover, company, detail, usdot, permit, now, log, assume_permit=False
 
     if permit:
         mover.utc_permit_number = permit
-    has_permit = bool(mover.utc_permit_number) or (assume_permit and company.status == VERIFIED_STATUS)
-    status = _status_for(company.status, has_permit)
+    has_permit = (bool(permit) or (bool(mover.utc_permit_number) and detail is None)) or (assume_permit and mover.utc_status == VERIFIED_STATUS)
+    status = _status_for(mover.utc_status, has_permit)
     if mover.source != Mover.Source.UTC and status != Mover.Status.VERIFIED:
         # Not permitted in-state: never verified, but not hidden either.
         if mover.status == Mover.Status.VERIFIED:
-            log(f"UTC {company.company_id} ({mover.name}): the UTC lists it as {company.status}. Set back to unverified.")
+            log(f"UTC {company.company_id} ({mover.name}): the UTC lists it as {mover.utc_status}. Set back to unverified.")
             mover.status = Mover.Status.UNVERIFIED
         return changes
 
@@ -258,6 +312,6 @@ def _update(mover, company, detail, usdot, permit, now, log, assume_permit=False
         changes["verified"] = True
     if status == Mover.Status.INACTIVE and mover.status != Mover.Status.INACTIVE:
         changes["deactivated"] = True
-        log(f"UTC {company.company_id} ({mover.name}): the UTC lists it as {company.status}. Set to inactive.")
+        log(f"UTC {company.company_id} ({mover.name}): the UTC lists it as {mover.utc_status}. Set to inactive.")
     mover.status = status
     return changes

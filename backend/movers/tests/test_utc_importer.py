@@ -18,9 +18,11 @@ def listed(cid, status="Active", usdot=None, name=None):
     return ListedCompany(company_id=cid, name=name or f"Company {cid} LLC", dba_name="", usdot_number=usdot, status=status)
 
 
-def detail(cid, permit="", usdot=None, city="Seattle", status="Active"):
+def detail(cid, permit="", usdot=None, city="Seattle", status="Active", permit_status=None):
+    if permit_status is None:
+        permit_status = "Active" if permit else ""
     return CompanyDetail(company_id=cid, name=f"Company {cid} LLC", status=status, phone="206-555-0100",
-                         street="1 Main St", city=city, state="WA", zip_code="98101",
+                         street="1 Main St", city=city, state="WA", zip_code="98101", permit_status=permit_status,
                          usdot_number=usdot, permit_number=permit, permit_type="Permanent" if permit else "")
 
 
@@ -66,7 +68,8 @@ class CreateTests(TestCase):
         self.assertEqual(get(2).city, "Seattle")  # details still read
 
     def test_active_without_a_readable_permit_stays_unverified(self):
-        run([listed(1)], {1: detail(1, permit="")})
+        # The household goods permit is Active, but its number couldn't be read.
+        run([listed(1)], {1: detail(1, permit="", permit_status="Active")})
         self.assertEqual(get(1).status, "unverified")
         self.assertFalse(get(1).is_bookable())
 
@@ -113,7 +116,7 @@ class UpdateTests(TestCase):
         self.assertEqual(get(1).utc_synced_at, LATER)
 
     def test_rereads_an_active_company_still_missing_its_permit(self):
-        run([listed(1)], {1: detail(1, permit="")})
+        run([listed(1)], {1: detail(1, permit="", permit_status="Active")})
         stats, fake = run([listed(1)], {1: detail(1, permit="HG9")}, now=LATER)
         self.assertEqual(fake.read, [1])
         self.assertEqual((get(1).status, get(1).utc_permit_number), ("verified", "HG9"))
@@ -206,3 +209,68 @@ class FmcsaRespectsUtcTests(TestCase):
         self.assertEqual(get(1).status, "inactive")
         import_movers([record(dot="00000111", docket="MC000111")], now=LATER)
         self.assertEqual(get(1).status, "inactive")
+
+
+class DuplicateListingTests(TestCase):
+    """The UTC sometimes lists one business twice under a USDOT number."""
+
+    def test_the_best_listing_owns_the_usdot_and_the_older_one_is_skipped(self):
+        stats, _ = run(
+            [listed(10, "Unregulated", usdot=555, name="Hood, Christopher R."), listed(20, "Active", usdot=555, name="A2B Moving LLC")],
+            {20: detail(20, permit="HG20", usdot=555)},
+        )
+        self.assertEqual((stats.created, stats.duplicates_skipped, stats.conflicts), (1, 1, 0))
+        mover = Mover.objects.get()
+        self.assertEqual((mover.utc_company_id, mover.status, mover.usdot_number), (20, "verified", 555))
+
+    def test_newest_record_wins_a_tie(self):
+        run([listed(10, "Active", usdot=555), listed(20, "Active", usdot=555)], {20: detail(20, permit="HG20", usdot=555)})
+        self.assertEqual(Mover.objects.get().utc_company_id, 20)
+
+    def test_a_profile_linked_to_the_older_listing_moves_to_the_better_one(self):
+        run([listed(10, "Unregulated", usdot=555)])
+        self.assertEqual(Mover.objects.get().utc_company_id, 10)
+        stats, _ = run([listed(10, "Unregulated", usdot=555), listed(20, "Active", usdot=555)], {20: detail(20, permit="HG20", usdot=555)}, now=LATER)
+        mover = Mover.objects.get()
+        self.assertEqual((mover.utc_company_id, mover.status, mover.utc_status), (20, "verified", "Active"))
+        self.assertEqual((stats.duplicates_skipped, stats.conflicts), (1, 0))
+
+    def test_an_fmcsa_profile_matches_the_best_listing(self):
+        import_movers([record(dot="00000555", docket="MC000555")], now=NOW)
+        run([listed(10, "Inactive", usdot=555), listed(20, "Active", usdot=555)], {20: detail(20, permit="HG20", usdot=555)})
+        mover = Mover.objects.get(usdot_number=555)
+        self.assertEqual((mover.utc_company_id, mover.status), (20, "verified"))
+
+
+class HouseholdGoodsPermitStatusTests(TestCase):
+    """A company can be Active on the UTC list because of another permit."""
+
+    def test_active_company_with_a_canceled_household_goods_permit(self):
+        run([listed(1)], {1: detail(1, permit="", permit_status="Canceled")})
+        mover = get(1)
+        self.assertEqual((mover.utc_status, mover.status), ("Canceled", "inactive"))
+        self.assertFalse(mover.is_bookable())
+
+    def test_active_company_with_no_household_goods_permit(self):
+        run([listed(1)], {1: detail(1, permit="", permit_status="")})
+        self.assertEqual((get(1).utc_status, get(1).status), ("No HHG permit", "inactive"))
+
+    def test_fmcsa_profile_is_not_protected_by_a_freight_only_company(self):
+        import_movers([record(dot="00000111", docket="MC000111")], now=NOW)
+        run([listed(1, usdot=111)], {1: detail(1, usdot=111, permit="", permit_status="Canceled")})
+        mover = Mover.objects.get(usdot_number=111)
+        self.assertEqual((mover.utc_status, mover.status), ("Canceled", "unverified"))
+        import_movers([record(dot="00000111", docket="MC000111", common="I")], now=LATER)
+        self.assertEqual(Mover.objects.get(usdot_number=111).status, "inactive")  # FMCSA may deactivate it
+
+    def test_the_page_is_re_read_and_the_permit_can_come_back(self):
+        run([listed(1)], {1: detail(1, permit="", permit_status="Canceled")})
+        stats, fake = run([listed(1)], {1: detail(1, permit="HG7")}, now=LATER)
+        self.assertEqual(fake.read, [1])
+        self.assertEqual((get(1).utc_status, get(1).status, get(1).utc_permit_number), ("Active", "verified", "HG7"))
+
+    def test_a_canceled_permit_unverifies_a_previously_verified_profile(self):
+        run([listed(1)], {1: detail(1, permit="HG7")})
+        Mover.objects.filter(utc_company_id=1).update(utc_permit_number=None)  # forces a re-read
+        run([listed(1)], {1: detail(1, permit="", permit_status="Canceled")}, now=LATER)
+        self.assertEqual((get(1).utc_status, get(1).status), ("Canceled", "inactive"))
